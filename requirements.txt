@@ -1,0 +1,25 @@
+# TWS Trading GUI Requirements
+# Python 3.6+ required
+
+# Interactive Brokers API
+ib-insync==0.9.86
+
+# Technical Analysis
+TA-Lib==0.4.19
+
+# Data Manipulation
+numpy==1.19.5
+pandas==1.1.5
+
+# Async Support
+nest-asyncio==1.5.1
+
+# GUI (tkinter is built-in with Python, no need to install separately)
+
+# Optional but recommended
+# eventkit==0.8.9  # Included with ib-insync
+
+# Note: TA-Lib requires pre-compiled binaries on Windows
+# Install using the wheel file included in the project:
+# pip install TA_Lib-0.4.19-cp36-cp36m-win_amd64.whl
+
