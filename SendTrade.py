@@ -232,11 +232,23 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
     logging.info("Key for this trade is- %s ", key)
     chartTime = await get_first_chart_time(timeFrame, outsideRth)
     while True:
-        dtime = str(datetime.datetime.now().date()) + " 02:31:01"
-        # dtime = config_time + datetime.timedelta(minutes=2)
-        if (datetime.datetime.now() < datetime.datetime.strptime(dtime, '%Y-%m-%d %H:%M:%S')):
-            await asyncio.sleep(1)
-            continue
+        # During overnight, skip the time check and proceed immediately
+        if outsideRth:
+            session = _get_current_session()
+            if session == 'OVERNIGHT':
+                logging.info("OVERNIGHT session: Skipping 02:31:01 time check, proceeding immediately")
+            else:
+                # For pre-market/after-hours, still check the time
+                dtime = str(datetime.datetime.now().date()) + " 02:31:01"
+                if (datetime.datetime.now() < datetime.datetime.strptime(dtime, '%Y-%m-%d %H:%M:%S')):
+                    await asyncio.sleep(1)
+                    continue
+        else:
+            # Regular hours: check the time
+            dtime = str(datetime.datetime.now().date()) + " 02:31:01"
+            if (datetime.datetime.now() < datetime.datetime.strptime(dtime, '%Y-%m-%d %H:%M:%S')):
+                await asyncio.sleep(1)
+                continue
 
         logging.info("RBRR send trade loop is running..")
         histData = None
@@ -248,8 +260,39 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             histData = connection.rbb_entry_historical_data(ibContract, timeFrame, chartTime)
             if (len(histData) == 0):
                 logging.info("RBB Chart Data is Not Comming for %s contract  and for %s time", ibContract, chartTime)
-                await asyncio.sleep(1)
-                continue
+                # During overnight, try to get daily candle data as fallback
+                if outsideRth:
+                    session = _get_current_session()
+                    if session == 'OVERNIGHT':
+                        logging.info("OVERNIGHT: Trying daily candle data as fallback for historical data")
+                        try:
+                            dailyData = connection.getDailyCandle(ibContract)
+                            if len(dailyData) > 0:
+                                # Create a mock histData from daily candle
+                                lastCandle = dailyData[-1]
+                                histData = {
+                                    'close': lastCandle.close,
+                                    'open': lastCandle.open,
+                                    'high': lastCandle.high,
+                                    'low': lastCandle.low,
+                                    'dateTime': lastCandle.date
+                                }
+                                Config.historicalData.update({key: histData})
+                                logging.info("OVERNIGHT: Using daily candle data as historical data: %s", histData)
+                            else:
+                                logging.warning("OVERNIGHT: No daily candle data available, will retry")
+                                await asyncio.sleep(1)
+                                continue
+                        except Exception as e:
+                            logging.error("OVERNIGHT: Error getting daily candle data: %s", e)
+                            await asyncio.sleep(1)
+                            continue
+                    else:
+                        await asyncio.sleep(1)
+                        continue
+                else:
+                    await asyncio.sleep(1)
+                    continue
             else:
                 Config.historicalData.update({key: histData})
 
@@ -268,8 +311,39 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         lastPrice = connection.get_recent_close_price_data(ibContract, timeFrame, chartTime)
         if (lastPrice == None or len(lastPrice) == 0 ):
             logging.info("RBRR Last Price Not Found for %s contract for mkt order", ibContract)
-            await  asyncio.sleep(1)
-            continue
+            # During overnight, try to get price from daily candle or tick data
+            if outsideRth:
+                session = _get_current_session()
+                if session == 'OVERNIGHT':
+                    logging.info("OVERNIGHT: Trying to get price from daily candle or tick data")
+                    try:
+                        # Try daily candle first
+                        dailyData = connection.getDailyCandle(ibContract)
+                        if len(dailyData) > 0:
+                            lastPrice = {'close': dailyData[-1].close}
+                            logging.info("OVERNIGHT: Got price from daily candle: %s", lastPrice['close'])
+                        else:
+                            # Try tick data
+                            connection.subscribeTicker(ibContract)
+                            priceObj = connection.getTickByTick(ibContract)
+                            if priceObj != None:
+                                lastPrice = {'close': priceObj.marketPrice()}
+                                connection.cancelTickData(ibContract)
+                                logging.info("OVERNIGHT: Got price from tick data: %s", lastPrice['close'])
+                            else:
+                                logging.warning("OVERNIGHT: Could not get price, will retry")
+                                await asyncio.sleep(1)
+                                continue
+                    except Exception as e:
+                        logging.error("OVERNIGHT: Error getting price: %s", e)
+                        await asyncio.sleep(1)
+                        continue
+                else:
+                    await asyncio.sleep(1)
+                    continue
+            else:
+                await asyncio.sleep(1)
+                continue
         lastPrice= lastPrice['close']
 
         lastPrice = round(lastPrice, Config.roundVal)
@@ -293,9 +367,21 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             await  asyncio.sleep(1)
             continue
 
-        if (atrCheck(histData, ibContract, connection, atrPercentage)):
-            await  asyncio.sleep(1)
-            continue
+        # During overnight, skip ATR check as it may be too restrictive with limited liquidity
+        if outsideRth:
+            session = _get_current_session()
+            if session == 'OVERNIGHT':
+                logging.info("OVERNIGHT session: Skipping ATR check to allow trade execution")
+            else:
+                # Pre-market/After-hours: still check ATR
+                if (atrCheck(histData, ibContract, connection, atrPercentage)):
+                    await  asyncio.sleep(1)
+                    continue
+        else:
+            # Regular hours: check ATR
+            if (atrCheck(histData, ibContract, connection, atrPercentage)):
+                await  asyncio.sleep(1)
+                continue
         logging.info("RBRR Trade action found for market order %s for %s contract ", tradeType, ibContract)
         # connection.cancelTickData(ibContract)
 
@@ -352,6 +438,13 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             quantity = round(quantity, 0)
         else:
             logging.info("user quantity")
+        
+        # Ensure quantity is at least 1 share and is an integer (IB requires minimum 1 share)
+        quantity = int(quantity)
+        if quantity < 1:
+            logging.warning(f"Quantity {quantity} is less than 1, setting to minimum of 1 share")
+            quantity = 1
+        
         logging.info("RBRR Trade quantity found for market order %s for %s contract ", quantity, ibContract)
         logging.info("RBRR everything found we are placing mkt trade")
         conf_trading_time = accordingRthTradingTimeCalculate(outsideRth)
@@ -371,9 +464,40 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         else:
             aux_price = aux_price - 0.01
 
-        response = connection.placeTrade(contract=ibContract,
-                                         order=Order(orderType="STP", action=tradeType, totalQuantity=quantity,
-                                                     tif=tif,auxPrice=aux_price), outsideRth=outsideRth)
+        # For Pre-Market/After-Hours: Use Stop Limit orders with calculated limit price
+        session = _get_current_session()
+        order_type = "STP"
+        limit_price = None
+        
+        if outsideRth and session in ('PREMARKET', 'AFTERHOURS'):
+            # Calculate stop size and buffer for limit price
+            stop_size = (float(histData['high']) - float(histData['low'])) + 0.02
+            buffer = stop_size * 0.33
+            # Round up buffer to 2 decimal places (ceiling)
+            import math
+            buffer = math.ceil(buffer * 100) / 100
+            
+            logging.info(f"Pre-market/After-hours: Using STP LMT order. Stop size={stop_size}, Buffer={buffer}")
+            
+            order_type = "STP LMT"
+            if tradeType == 'BUY':
+                # For BUY: Limit = Entry + buffer
+                limit_price = aux_price + buffer
+            else:
+                # For SELL: Limit = Entry - buffer
+                limit_price = aux_price - buffer
+            
+            limit_price = round(limit_price, 2)
+            logging.info(f"Pre-market/After-hours {tradeType}: Stop={aux_price}, Limit={limit_price}")
+            
+            response = connection.placeTrade(contract=ibContract,
+                                           order=Order(orderType=order_type, action=tradeType, totalQuantity=quantity,
+                                                       tif=tif, auxPrice=aux_price, lmtPrice=limit_price), outsideRth=outsideRth)
+        else:
+            # Regular hours or overnight: use regular STP order (will be converted to LMT in overnight by placeTrade)
+            response = connection.placeTrade(contract=ibContract,
+                                           order=Order(orderType=order_type, action=tradeType, totalQuantity=quantity,
+                                                       tif=tif, auxPrice=aux_price), outsideRth=outsideRth)
         StatusUpdate(response, 'Entry', ibContract, 'STP', tradeType, quantity, histData, lastPrice, symbol,
                      timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue, breakEven,
                      outsideRth)
@@ -396,6 +520,73 @@ async def rbb_loop_run(connection,key,entry_order):
                 sleep_time = getTimeInterval(old_order['timeFrame'], datetime.datetime.now())
                 await asyncio.sleep(sleep_time)
             old_order = Config.orderStatusData[order.orderId]
+            
+            # Check if entry is filled - place protection order for pre-market/after-hours
+            if old_order['status'] == 'Filled' and old_order.get('outsideRth', False):
+                session = _get_current_session()
+                if session in ('PREMARKET', 'AFTERHOURS'):
+                    # Check if protection order already placed
+                    if not old_order.get('protection_placed', False):
+                        logging.info("RBBB Entry filled in %s, placing protection stop limit order", session)
+                        
+                        # Get historical data for stop loss calculation
+                        histData = old_order.get('histData', {})
+                        if histData:
+                            # Calculate stop loss price (opposite of entry direction)
+                            if old_order['action'] == 'BUY':
+                                # For BUY: Stop loss at bar low
+                                stop_price = histData['low'] - 0.01
+                                protection_action = 'SELL'
+                            else:
+                                # For SELL: Stop loss at bar high
+                                stop_price = histData['high'] + 0.01
+                                protection_action = 'BUY'
+                            
+                            # Calculate limit price for protection order
+                            stop_size = (float(histData['high']) - float(histData['low'])) + 0.02
+                            buffer = stop_size * 0.33
+                            import math
+                            buffer = math.ceil(buffer * 100) / 100
+                            
+                            # Protection limit = stop ± (2 × buffer)
+                            double_buffer = buffer * 2
+                            if protection_action == 'SELL':
+                                # For SELL protection: limit = stop - (2 × buffer)
+                                limit_price = stop_price - double_buffer
+                            else:
+                                # For BUY protection: limit = stop + (2 × buffer)
+                                limit_price = stop_price + double_buffer
+                            
+                            limit_price = round(limit_price, 2)
+                            stop_price = round(stop_price, 2)
+                            
+                            logging.info(f"RBBB Protection order: {protection_action} STP LMT, Stop={stop_price}, Limit={limit_price}, Stop size={stop_size}, Buffer={buffer}")
+                            
+                            # Place protection order
+                            protection_order = Order(
+                                orderType="STP LMT",
+                                action=protection_action,
+                                totalQuantity=old_order['totalQuantity'],
+                                tif='DAY',
+                                auxPrice=stop_price,
+                                lmtPrice=limit_price
+                            )
+                            
+                            protection_response = connection.placeTrade(
+                                contract=old_order['contract'],
+                                order=protection_order,
+                                outsideRth=True
+                            )
+                            
+                            logging.info("RBBB Protection order placed: %s", protection_response)
+                            
+                            # Mark protection as placed
+                            old_order['protection_placed'] = True
+                            old_order['protection_order_id'] = protection_response.order.orderId
+                            Config.orderStatusData[order.orderId] = old_order
+                
+                break  # Exit loop after entry is filled
+            
             if (old_order['status'] != 'Filled' and old_order['status'] != 'Cancelled' and old_order['status'] != 'Inactive'):
                 logging.info("RBBB stp updation start  %s %s", order.orderId , old_order['status'].upper()  )
 
@@ -424,9 +615,32 @@ async def rbb_loop_run(connection,key,entry_order):
                         aux_price = aux_price - 0.01
                     order.auxPrice = aux_price
                     old_orderId=order.orderId
-                    new_order = Order( orderType="STP", action=order.action, totalQuantity=order.totalQuantity,  tif='DAY',auxPrice=aux_price)
+                    
+                    # For Pre-Market/After-Hours: Use Stop Limit orders
+                    session = _get_current_session()
+                    if old_order.get('outsideRth', False) and session in ('PREMARKET', 'AFTERHOURS'):
+                        # Calculate limit price for stop limit order
+                        stop_size = (float(histData['high']) - float(histData['low'])) + 0.02
+                        buffer = stop_size * 0.33
+                        import math
+                        buffer = math.ceil(buffer * 100) / 100
+                        
+                        if old_order['userBuySell'] == 'BUY':
+                            limit_price = aux_price + buffer
+                        else:
+                            limit_price = aux_price - buffer
+                        
+                        limit_price = round(limit_price, 2)
+                        logging.info(f"RBBB Update: Pre-market/After-hours STP LMT, Stop={aux_price}, Limit={limit_price}")
+                        new_order = Order(orderType="STP LMT", action=order.action, totalQuantity=order.totalQuantity, 
+                                        tif='DAY', auxPrice=aux_price, lmtPrice=limit_price)
+                    else:
+                        new_order = Order(orderType="STP", action=order.action, totalQuantity=order.totalQuantity,  
+                                        tif='DAY', auxPrice=aux_price)
+                    
                     connection.cancelTrade(order)
-                    response = connection.placeTrade(contract=old_order['contract'], order=new_order)
+                    response = connection.placeTrade(contract=old_order['contract'], order=new_order, 
+                                                   outsideRth=old_order.get('outsideRth', False))
                     logging.info("RBBB  response of updating stp order %s ",response)
                     order =response.order
                     if(Config.orderStatusData.get(old_orderId) != None ):

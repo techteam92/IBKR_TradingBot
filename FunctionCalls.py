@@ -11,7 +11,29 @@ def getKey(barType,symbol):
     else:
         return (symbol + str(datetime.datetime.now()))
 
+def _get_current_session():
+    """Detect current trading session"""
+    now = datetime.datetime.now().time().replace(microsecond=0)
+    pre_start = datetime.time(4, 0, 0)
+    rth_start = datetime.time(9, 30, 0)
+    rth_end = datetime.time(16, 0, 0)
+    after_end = datetime.time(20, 0, 0)
+    if rth_start <= now < rth_end:
+        return 'RTH'
+    if pre_start <= now < rth_start:
+        return 'PREMARKET'
+    if rth_end <= now < after_end:
+        return 'AFTERHOURS'
+    return 'OVERNIGHT'
+
 def checkTradingTimeForLb(tradingTime,timeFrame,outsideRth=False):
+    # During extended hours (pre-market, after-hours, overnight), don't wait for trading time - allow immediate execution
+    if outsideRth:
+        session = _get_current_session()
+        if session in ('OVERNIGHT', 'PREMARKET', 'AFTERHOURS'):
+            logging.info("%s session (LB): Skipping trading time check, allowing immediate trade execution", session)
+            return None  # Return None to allow immediate execution
+    
     conf_trading_time = tradingTime
     if outsideRth:
         conf_trading_time = tradingTime
@@ -29,6 +51,13 @@ def checkTradingTimeForLb(tradingTime,timeFrame,outsideRth=False):
         return None
 
 def checkTradingTime(timeFrame,outsideRth=False):
+    # During extended hours (pre-market, after-hours, overnight), don't wait for trading time - allow immediate execution
+    if outsideRth:
+        session = _get_current_session()
+        if session in ('OVERNIGHT', 'PREMARKET', 'AFTERHOURS'):
+            logging.info("%s session: Skipping trading time check, allowing immediate trade execution", session)
+            return None  # Return None to allow immediate execution
+    
     conf_trading_time = Config.tradingTime
     if outsideRth:
         conf_trading_time = Config.outsideRthTradingtime
