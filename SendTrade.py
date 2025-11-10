@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import math
 import random
 import Config
 from header import *
@@ -55,6 +56,33 @@ def accordingRthTradingTimeCalculate(outsideRth=False):
     if outsideRth:
         conf_trading_time = Config.outsideRthTradingtime
     return conf_trading_time
+
+
+def _is_extended_outside_rth(outsideRth: bool):
+    """
+    Returns (is_extended, session) where is_extended is True only when the user
+    allows outsideRth trading and the detected session is PREMARKET or AFTERHOURS.
+    """
+    if not outsideRth:
+        return False, None
+    session = _get_current_session()
+    if session in ('PREMARKET', 'AFTERHOURS'):
+        return True, session
+    return False, session
+
+
+def _calculate_stop_limit_offsets(histData):
+    """
+    Calculate the stop size, 33% buffer (rounded up to cents), and double buffer
+    used for extended-hours stop-limit orders.
+    """
+    high = float(histData['high'])
+    low = float(histData['low'])
+    stop_size = (high - low) + Config.add002
+    buffer = stop_size * 0.33
+    buffer = math.ceil(buffer * 100) / 100  # round up to nearest cent
+    double_buffer = round(buffer * 2, Config.roundVal)
+    return stop_size, round(buffer, Config.roundVal), double_buffer
 
 async def get_first_chart_time_lb(config_tradingTime, timeFrame ,outsideRth=False):
     # // trading time if time is perfect we can send trade then it will return none else it will give config trading time
@@ -464,18 +492,13 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         else:
             aux_price = aux_price - 0.01
 
-        # For Pre-Market/After-Hours: Use Stop Limit orders with calculated limit price
-        session = _get_current_session()
+        is_extended, session = _is_extended_outside_rth(outsideRth)
         order_type = "STP"
         limit_price = None
         
-        if outsideRth and session in ('PREMARKET', 'AFTERHOURS'):
+        if is_extended:
             # Calculate stop size and buffer for limit price
-            stop_size = (float(histData['high']) - float(histData['low'])) + 0.02
-            buffer = stop_size * 0.33
-            # Round up buffer to 2 decimal places (ceiling)
-            import math
-            buffer = math.ceil(buffer * 100) / 100
+            stop_size, buffer, _ = _calculate_stop_limit_offsets(histData)
             
             logging.info(f"Pre-market/After-hours: Using STP LMT order. Stop size={stop_size}, Buffer={buffer}")
             
@@ -487,7 +510,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                 # For SELL: Limit = Entry - buffer
                 limit_price = aux_price - buffer
             
-            limit_price = round(limit_price, 2)
+            limit_price = round(limit_price, Config.roundVal)
             logging.info(f"Pre-market/After-hours {tradeType}: Stop={aux_price}, Limit={limit_price}")
             
             response = connection.placeTrade(contract=ibContract,
@@ -498,7 +521,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             response = connection.placeTrade(contract=ibContract,
                                            order=Order(orderType=order_type, action=tradeType, totalQuantity=quantity,
                                                        tif=tif, auxPrice=aux_price), outsideRth=outsideRth)
-        StatusUpdate(response, 'Entry', ibContract, 'STP', tradeType, quantity, histData, lastPrice, symbol,
+        StatusUpdate(response, 'Entry', ibContract, order_type, tradeType, quantity, histData, lastPrice, symbol,
                      timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue, breakEven,
                      outsideRth)
         # Config.rbbb_dict.update({key:response.order})
@@ -523,8 +546,8 @@ async def rbb_loop_run(connection,key,entry_order):
             
             # Check if entry is filled - place protection order for pre-market/after-hours
             if old_order['status'] == 'Filled' and old_order.get('outsideRth', False):
-                session = _get_current_session()
-                if session in ('PREMARKET', 'AFTERHOURS'):
+                is_extended, session = _is_extended_outside_rth(old_order.get('outsideRth', False))
+                if is_extended:
                     # Check if protection order already placed
                     if not old_order.get('protection_placed', False):
                         logging.info("RBBB Entry filled in %s, placing protection stop limit order", session)
@@ -543,13 +566,8 @@ async def rbb_loop_run(connection,key,entry_order):
                                 protection_action = 'BUY'
                             
                             # Calculate limit price for protection order
-                            stop_size = (float(histData['high']) - float(histData['low'])) + 0.02
-                            buffer = stop_size * 0.33
-                            import math
-                            buffer = math.ceil(buffer * 100) / 100
+                            stop_size, buffer, double_buffer = _calculate_stop_limit_offsets(histData)
                             
-                            # Protection limit = stop ± (2 × buffer)
-                            double_buffer = buffer * 2
                             if protection_action == 'SELL':
                                 # For SELL protection: limit = stop - (2 × buffer)
                                 limit_price = stop_price - double_buffer
@@ -557,8 +575,8 @@ async def rbb_loop_run(connection,key,entry_order):
                                 # For BUY protection: limit = stop + (2 × buffer)
                                 limit_price = stop_price + double_buffer
                             
-                            limit_price = round(limit_price, 2)
-                            stop_price = round(stop_price, 2)
+                            limit_price = round(limit_price, Config.roundVal)
+                            stop_price = round(stop_price, Config.roundVal)
                             
                             logging.info(f"RBBB Protection order: {protection_action} STP LMT, Stop={stop_price}, Limit={limit_price}, Stop size={stop_size}, Buffer={buffer}")
                             
@@ -617,20 +635,17 @@ async def rbb_loop_run(connection,key,entry_order):
                     old_orderId=order.orderId
                     
                     # For Pre-Market/After-Hours: Use Stop Limit orders
-                    session = _get_current_session()
-                    if old_order.get('outsideRth', False) and session in ('PREMARKET', 'AFTERHOURS'):
+                    is_extended, _ = _is_extended_outside_rth(old_order.get('outsideRth', False))
+                    if is_extended:
                         # Calculate limit price for stop limit order
-                        stop_size = (float(histData['high']) - float(histData['low'])) + 0.02
-                        buffer = stop_size * 0.33
-                        import math
-                        buffer = math.ceil(buffer * 100) / 100
+                        _, buffer, _ = _calculate_stop_limit_offsets(histData)
                         
                         if old_order['userBuySell'] == 'BUY':
                             limit_price = aux_price + buffer
                         else:
                             limit_price = aux_price - buffer
                         
-                        limit_price = round(limit_price, 2)
+                        limit_price = round(limit_price, Config.roundVal)
                         logging.info(f"RBBB Update: Pre-market/After-hours STP LMT, Stop={aux_price}, Limit={limit_price}")
                         new_order = Order(orderType="STP LMT", action=order.action, totalQuantity=order.totalQuantity, 
                                         tif='DAY', auxPrice=aux_price, lmtPrice=limit_price)
@@ -1646,12 +1661,64 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
             br_order = connection.ib.bracketOrder( userBuySell, quantity, tp, tp, sl)
             logging.info(f"bracket order ------------------  %s ",br_order)
             ord = br_order[0]
-            ent_order = Order(orderId=ord.orderId,orderType='STP',auxPrice=lastPrice,totalQuantity=ord.totalQuantity,action=ord.action,transmit=True)
+            is_extended, session = _is_extended_outside_rth(outsideRth)
+            entry_order_type = 'STP'
+            entry_kwargs = dict(
+                orderId=ord.orderId,
+                orderType='STP',
+                auxPrice=round(lastPrice, Config.roundVal),
+                totalQuantity=ord.totalQuantity,
+                action=ord.action,
+                transmit=True
+            )
+            stop_order = br_order[2]
+            stop_order_type = 'STP'
+            stop_order.auxPrice = round(sl, Config.roundVal)
+            stop_order.orderType = 'STP'
+            stop_order.lmtPrice = getattr(stop_order, "lmtPrice", 0.0)
+
+            if is_extended:
+                _, buffer, double_buffer = _calculate_stop_limit_offsets(histData)
+                if tradeType == 'BUY':
+                    entry_limit = entry_kwargs['auxPrice'] + buffer
+                    protection_limit = stop_order.auxPrice - double_buffer
+                else:
+                    entry_limit = entry_kwargs['auxPrice'] - buffer
+                    protection_limit = stop_order.auxPrice + double_buffer
+
+                entry_order_type = 'STP LMT'
+                entry_kwargs['orderType'] = 'STP LMT'
+                entry_kwargs['lmtPrice'] = round(entry_limit, Config.roundVal)
+
+                stop_order_type = 'STP LMT'
+                stop_order.orderType = 'STP LMT'
+                stop_order.lmtPrice = round(protection_limit, Config.roundVal)
+
+                logging.info(
+                    "Extended hours bracket: entry %s stop=%s limit=%s | protection %s stop=%s limit=%s (buffer=%s double=%s)",
+                    entry_order_type,
+                    entry_kwargs['auxPrice'],
+                    entry_kwargs['lmtPrice'],
+                    stop_order_type,
+                    stop_order.auxPrice,
+                    stop_order.lmtPrice,
+                    buffer,
+                    double_buffer
+                )
+            else:
+                # Ensure limit price is cleared in regular hours
+                if hasattr(stop_order, "lmtPrice"):
+                    stop_order.lmtPrice = 0.0
+
+            ent_order = Order(**entry_kwargs)
+            stop_order.auxPrice = round(stop_order.auxPrice, Config.roundVal)
+            if stop_order_type == 'STP':
+                stop_order.lmtPrice = getattr(stop_order, "lmtPrice", 0.0)
 
 
             entry_res = connection.placeTrade(contract=ibcontract, order=ent_order, outsideRth=outsideRth)
             logging.info(f"response of  bracket order first %s   contract %s",entry_res,ibcontract)
-            StatusUpdate(entry_res, 'Entry', ibcontract, 'MKT', tradeType, quantity, histData, lastPrice, symbol,
+            StatusUpdate(entry_res, 'Entry', ibcontract, entry_order_type, tradeType, quantity, histData, lastPrice, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, userBuySell, userAtr, slValue,
                          breakEven, outsideRth)
             res = connection.placeTrade(contract=ibcontract, order=br_order[1], outsideRth=outsideRth)
@@ -1661,7 +1728,7 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
                          breakEven, outsideRth)
             res = connection.placeTrade(contract=ibcontract, order=br_order[2], outsideRth=outsideRth)
             logging.info(f"response of  bracket order third %s   contract %s", res, ibcontract)
-            StatusUpdate(res, 'StopLoss', ibcontract, 'STP', tradeType, quantity, histData, lastPrice, symbol,
+            StatusUpdate(res, 'StopLoss', ibcontract, stop_order_type, tradeType, quantity, histData, lastPrice, symbol,
                          timeFrame, profit, stopLoss, risk,Config.orderStatusData.get(int(entry_res.order.orderId)), tif, barType, userBuySell, userAtr, slValue,
                          breakEven, outsideRth)
 
@@ -1955,14 +2022,43 @@ def sendMoc(connection, entryData,price,action):
 
 def sendStopLoss(connection, entryData,price,action):
     try:
-        # if action == "BUY":
-        #     price = price +1
-        # else:
-        #     price = price -1
+        price = round(price, Config.roundVal)
+        is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
+        order_type = "STP"
+        order_kwargs = dict(
+            orderType="STP",
+            action=action,
+            totalQuantity=entryData['totalQuantity'],
+            auxPrice=price,
+            tif=entryData['tif'],
+            ocaGroup="tp" + str(entryData['orderId']),
+            ocaType=1
+        )
+
+        hist_data = entryData.get('histData')
+        extended_hist_supported = (
+            is_extended and isinstance(hist_data, dict) and
+            'high' in hist_data and 'low' in hist_data
+        )
+
+        if extended_hist_supported:
+            _, buffer, double_buffer = _calculate_stop_limit_offsets(hist_data)
+            if action.upper() == "BUY":
+                limit_price = price + double_buffer
+            else:
+                limit_price = price - double_buffer
+
+            order_type = "STP LMT"
+            order_kwargs['orderType'] = "STP LMT"
+            order_kwargs['lmtPrice'] = round(limit_price, Config.roundVal)
+            logging.info(
+                "Extended hours protection stop-limit: action=%s stop=%s limit=%s buffer=%s double=%s session=%s",
+                action, price, order_kwargs['lmtPrice'], buffer, double_buffer, session
+            )
+
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
-                                            order=Order(orderType="STP", action=action,
-                                                        totalQuantity=entryData['totalQuantity'], auxPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1)  ,outsideRth = entryData['outsideRth'] )
-        StatusUpdate(lmtResponse, 'StopLoss', entryData['contract'], 'STP', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
+                                            order=Order(**order_kwargs), outsideRth=entryData['outsideRth'] )
+        StatusUpdate(lmtResponse, 'StopLoss', entryData['contract'], order_type, action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
 
         print(lmtResponse)
         if(entryData['stopLoss'] == Config.stopLoss[1]):
