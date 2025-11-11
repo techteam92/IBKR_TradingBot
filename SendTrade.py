@@ -1612,6 +1612,7 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         # Enforce client trading-session rules
         session = _get_current_session()
         logging.info("Current session detected: %s, outsideRth flag: %s", session, outsideRth)
+        print(f"Current trading session: {session} (outsideRth={outsideRth})")
         
         if outsideRth:
             if session in ('PREMARKET', 'AFTERHOURS'):
@@ -1654,6 +1655,8 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
 
 def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk,tif,barType,userBuySell,userAtr,slValue=0,breakEven=False ,outsideRth=False):
     try:
+        current_session = _get_current_session()
+        print(f"Placing order in session: {current_session} (outsideRth={outsideRth})")
         if barType == Config.entryTradeType[0]:
             tp,sl = TpSlForFB(connection,ibcontract,tradeType,quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk,tif,barType,userBuySell,userAtr,slValue,breakEven,outsideRth)
             logging.info(f"tp %s sl %s found for ,ibcontract %s ,tradeType %s ,quantity %s ,histData %s ,lastPrice %s , symbol %s ,timeFrame %s ,profit %s ,stopLoss %s ,risk %s ,tif %s ,barType %s ,userBuySell %s ,userAtr %s ,slValue %s ,breakEven %s ,outsideRth %s ",tp,sl ,ibcontract,tradeType,quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk,tif,barType,userBuySell,userAtr,slValue,breakEven,outsideRth )
