@@ -48,7 +48,7 @@ historicalData={}
 currentPnl = 0
 pbe1_saved = {}
 
-timeFrame = ['1 min', '2 mins', '3 mins', '5 mins', '10 mins', '15 mins','1 hour']
+timeFrame = ['1 min', '2 mins', '3 mins', '5 mins', '10 mins', '15 mins', '30 mins','1 hour']
 timeDictInMinute ={'1 min':1, '2 mins':2, '3 mins':3, '5 mins':5, '10 mins':10, '15 mins':15, '20 mins':20, '30 mins':30, '1 hour':60,
 '2 hours':120, '3 hours':180, '4 hours':240}
 
