@@ -8,6 +8,7 @@ from StatusUpdate import *
 import traceback
 import talib
 from FunctionCalls import *
+from ib_insync import util
 def getContract(symbol,currency):
     try:
         logging.info("creating contract for %s symbole is %s and currency is %s",Config.ibContract,symbol,currency)
@@ -87,6 +88,72 @@ def _calculate_stop_limit_offsets(histData):
     entry_offset = round(entry_offset, Config.roundVal)
     protection_offset = round(protection_offset, Config.roundVal)
     return stop_size, entry_offset, protection_offset
+
+MANUAL_ORDER_TYPES = tuple(Config.manualOrderTypes)
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _get_atr_value(connection, contract):
+    try:
+        candle_data = connection.getDailyCandle(contract)
+        if candle_data is None or len(candle_data) == 0:
+            logging.warning("ATR data not available for contract %s", contract)
+            return None
+        candle_df = util.df(candle_data)
+        atr_series = talib.ATR(candle_df['high'], candle_df['low'], candle_df['close'], 9)
+        atr_value = float(atr_series.iloc[-1]) if hasattr(atr_series, "iloc") else float(atr_series[-1])
+        logging.info("ATR value for %s is %s", contract, atr_value)
+        return atr_value
+    except Exception as e:
+        logging.error("error while calculating ATR for %s: %s", contract, e)
+        return None
+
+def _get_atr_stop_offset(connection, contract, stoploss_type):
+    percent = Config.atrStopLossMap.get(stoploss_type)
+    if percent is None:
+        return None
+    atr_value = _get_atr_value(connection, contract)
+    if atr_value is None:
+        return None
+    offset = atr_value * percent
+    offset = round(offset, Config.roundVal)
+    logging.info("ATR stop offset for %s type %s is %s", contract, stoploss_type, offset)
+    return offset
+
+def _parse_entry_price(entry_points):
+    price = _to_float(entry_points, None)
+    if price is None or price == 0:
+        raise ValueError("Entry price is required for manual orders.")
+    return round(price, Config.roundVal)
+
+def _resolve_manual_quantity(risk):
+    qty = _to_float(risk, 0)
+    try:
+        qty = int(qty)
+    except Exception:
+        qty = 0
+    if qty <= 0:
+        qty = 1
+    return qty
+
+def _get_latest_hist_bar(connection, contract, timeFrame):
+    chartTime = getRecentChartTime(timeFrame)
+    hist_dataset = connection.getHistoricalChartDataForEntry(contract, timeFrame, chartTime)
+    latest_bar = None
+    if isinstance(hist_dataset, dict) and len(hist_dataset) > 0:
+        last_key = sorted(hist_dataset.keys())[-1]
+        latest_bar = hist_dataset.get(last_key)
+    elif isinstance(hist_dataset, list) and len(hist_dataset) > 0:
+        latest_bar = hist_dataset[-1]
+    else:
+        latest_bar = hist_dataset
+    if latest_bar is None:
+        logging.warning("Historical data not available for %s %s", contract, timeFrame)
+    return latest_bar
 
 async def get_first_chart_time_lb(config_tradingTime, timeFrame ,outsideRth=False):
     # // trading time if time is perfect we can send trade then it will return none else it will give config trading time
@@ -538,6 +605,54 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         if barType == Config.entryTradeType[2]:
             await rbb_loop_run(connection,key,response.order)
         break
+
+async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                             atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points):
+    try:
+        entry_price = _parse_entry_price(entry_points)
+    except ValueError as err:
+        logging.error("Manual limit order requires a valid entry price: %s", err)
+        return
+    try:
+        contract = getContract(symbol, None)
+        histData = _get_latest_hist_bar(connection, contract, timeFrame)
+        if histData is None:
+            logging.error("Unable to fetch historical data for manual limit order %s %s", symbol, timeFrame)
+            return
+        qty = _resolve_manual_quantity(risk)
+        order = Order(orderType="LMT", action=buySellType, totalQuantity=qty, lmtPrice=entry_price, tif=tif)
+        response = connection.placeTrade(contract=contract, order=order, outsideRth=outsideRth)
+        StatusUpdate(response, 'Entry', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
+                     timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                     breakEven, outsideRth)
+        logging.info("Manual limit order placed for %s at %s", symbol, entry_price)
+    except Exception as e:
+        logging.error("error in manual limit order %s", e)
+        traceback.print_exc()
+
+async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                            atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points):
+    try:
+        entry_price = _parse_entry_price(entry_points)
+    except ValueError as err:
+        logging.error("Manual stop order requires a valid entry price: %s", err)
+        return
+    try:
+        contract = getContract(symbol, None)
+        histData = _get_latest_hist_bar(connection, contract, timeFrame)
+        if histData is None:
+            logging.error("Unable to fetch historical data for manual stop order %s %s", symbol, timeFrame)
+            return
+        qty = _resolve_manual_quantity(risk)
+        order = Order(orderType="STP", action=buySellType, totalQuantity=qty, auxPrice=entry_price, tif=tif)
+        response = connection.placeTrade(contract=contract, order=order, outsideRth=outsideRth)
+        StatusUpdate(response, 'Entry', contract, 'STP', buySellType, qty, histData, entry_price, symbol,
+                     timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                     breakEven, outsideRth)
+        logging.info("Manual stop order placed for %s at %s", symbol, entry_price)
+    except Exception as e:
+        logging.error("error in manual stop order %s", e)
+        traceback.print_exc()
 
 async def rbb_loop_run(connection,key,entry_order):
     order = entry_order
@@ -1622,9 +1737,10 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         
         if outsideRth:
             if session in ('PREMARKET', 'AFTERHOURS'):
-                # Only allow RB/RBB
-                if not (barType == Config.entryTradeType[1] or barType == Config.entryTradeType[2]):
-                    logging.info("%s session: Only RB/RBB allowed; skipping barType %s", session, barType)
+                # Only allow RB/RBB and manual order types
+                allowed_types = (Config.entryTradeType[1], Config.entryTradeType[2]) + MANUAL_ORDER_TYPES
+                if barType not in allowed_types:
+                    logging.info("%s session: Only RB/RBB or manual orders allowed; skipping barType %s", session, barType)
                     return
             elif session == 'OVERNIGHT':
                 # Overnight: all strategies allowed, but orders will be converted to limit types
@@ -1634,6 +1750,14 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             # If outsideRth is False but we're in an extended hours session, warn
             if session in ('PREMARKET', 'AFTERHOURS', 'OVERNIGHT'):
                 logging.warning("Session is %s but outsideRth=False. Consider setting outsideRth=True for extended hours trading.", session)
+        if barType == Config.manualOrderTypes[0]:
+            await manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                                     atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
+            return
+        elif barType == Config.manualOrderTypes[1]:
+            await manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                                    atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
+            return
         if barType == Config.entryTradeType[0]:
             await (first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[1] or barType == Config.entryTradeType[2]:
@@ -1836,6 +1960,25 @@ def get_tp_for_buying(connection, timeFrame, contract, profit_type, filled_price
 
 def get_sl_for_selling(connection,stoploss_type,filled_price, histData,slValue ,contract,timeframe,chartTime):
     # we are sending sell sl order bcz entry buy
+    if stoploss_type in Config.atrStopLossMap:
+        atr_offset = _get_atr_stop_offset(connection, contract, stoploss_type)
+        if atr_offset is not None:
+            stpPrice = float(filled_price) - atr_offset
+            logging.info("ATR stop loss (long) %s offset %s filled_price %s stop %s",
+                         stoploss_type, atr_offset, filled_price, stpPrice)
+            stpPrice = round(stpPrice, Config.roundVal)
+            return stpPrice
+        else:
+            logging.warning("ATR stop loss offset missing for %s, falling back to EntryBar", stoploss_type)
+
+    if stoploss_type == Config.stopLoss[-1]:
+        custom_offset = _to_float(slValue, 0)
+        stpPrice = float(filled_price) - custom_offset
+        logging.info("Custom stop loss (long) offset %s filled_price %s stop %s",
+                     custom_offset, filled_price, stpPrice)
+        stpPrice = round(stpPrice, Config.roundVal)
+        return stpPrice
+
     if stoploss_type == Config.stopLoss[0]:
         stpPrice = float(histData['low'])
         logging.info(f"sl calculation for selling %s , price %s  stoploss_type %s ,filled_price %s , histData %s ,slValue  %s ,timeframe %s ,chartTime %s", contract,   stpPrice,stoploss_type,filled_price, histData,slValue ,timeframe,chartTime)
@@ -1875,6 +2018,25 @@ def get_sl_for_selling(connection,stoploss_type,filled_price, histData,slValue ,
     return stpPrice
 def get_sl_for_buying(connection,stoploss_type,filled_price, histData,slValue ,contract,timeframe,chartTime):
     # we are sending buy sl order
+    if stoploss_type in Config.atrStopLossMap:
+        atr_offset = _get_atr_stop_offset(connection, contract, stoploss_type)
+        if atr_offset is not None:
+            stpPrice = float(filled_price) + atr_offset
+            logging.info("ATR stop loss (short) %s offset %s filled_price %s stop %s",
+                         stoploss_type, atr_offset, filled_price, stpPrice)
+            stpPrice = round(stpPrice, Config.roundVal)
+            return stpPrice
+        else:
+            logging.warning("ATR stop loss offset missing for %s, falling back to EntryBar", stoploss_type)
+
+    if stoploss_type == Config.stopLoss[-1]:
+        custom_offset = _to_float(slValue, 0)
+        stpPrice = float(filled_price) + custom_offset
+        logging.info("Custom stop loss (short) offset %s filled_price %s stop %s",
+                     custom_offset, filled_price, stpPrice)
+        stpPrice = round(stpPrice, Config.roundVal)
+        return stpPrice
+
     if stoploss_type == Config.stopLoss[0]:
         stpPrice = float(histData['high'])
         logging.info(
@@ -1905,7 +2067,7 @@ def get_sl_for_buying(connection,stoploss_type,filled_price, histData,slValue ,c
                                                                   chartTime)
         for data in range(0, (len(recentBarData) )):
             if (low_value == 0 or low_value > recentBarData.get(data)['low']):
-                low_value = recentBarData.get(data)['high']
+                low_value = recentBarData.get(data)['low']  # Fixed: was incorrectly using 'high'
                 logging.info(f"low value found for %s recentBarData.get(data) %s ", contract, recentBarData.get(data))
 
         stpPrice = float(low_value) - float(slValue)
@@ -1977,8 +2139,12 @@ async def sendTpSlBuy(connection, entryData):
 
             price = 0
             filled_price = Config.orderFilledPrice.get(entryData['orderId'])
-            logging.info("In TPSL %s contract  and for %s histdata",
-                         entryData['contract'], histData)
+            # Use entry stop price (lastPrice) instead of filled price for take profit calculation
+            entry_stop_price = entryData.get('lastPrice', filled_price)
+            if entry_stop_price is None:
+                entry_stop_price = filled_price
+            logging.info("In TPSL %s contract  and for %s histdata. Entry stop price=%s, Filled price=%s",
+                         entryData['contract'], histData, entry_stop_price, filled_price)
             if (entryData['barType'] == Config.entryTradeType[3]) or (entryData['barType'] == Config.entryTradeType[4]) or (entryData['barType'] == Config.entryTradeType[5]):
                 candleData = connection.getDailyCandle(entryData['contract'])
                 if (candleData == None or len(candleData) < 1):
@@ -1993,27 +2159,27 @@ async def sendTpSlBuy(connection, entryData):
                     stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
 
                 multiplier_map = {
-                    Config.takeProfit[0]: 1,
-                    Config.takeProfit[1]: 1.5,
-                    Config.takeProfit[2]: 2,
-                    Config.takeProfit[3]: 3,
-                    Config.takeProfit[5]: 2.5,
+                    Config.takeProfit[0]: 2,  # "1:1" means 2× stop_size for short positions
+                    Config.takeProfit[1]: 2.5,  # "1.5:1" means 2.5× stop_size
+                    Config.takeProfit[2]: 3,  # "2:1" means 3× stop_size
+                    Config.takeProfit[3]: 4,  # "3:1" means 4× stop_size
+                    Config.takeProfit[5]: 3.5,  # "2.5:1" means 3.5× stop_size
                 }
 
                 multiplier = multiplier_map.get(entryData['profit'])
                 if multiplier is not None:
-                    price = float(filled_price) - (multiplier * stop_size)
+                    price = float(entry_stop_price) - (multiplier * stop_size)
                 else:
                     price = float(histData['low'])
 
                 price = round(price, Config.roundVal)
                 logging.info(
-                    "Extended TP calculation (buy) %s stop_size=%s multiplier=%s filled=%s price=%s",
-                    entryData['contract'], stop_size, multiplier, filled_price, price,
+                    "Extended TP calculation (buy/SHORT) %s stop_size=%s multiplier=%s entry_stop_price=%s filled_price=%s price=%s",
+                    entryData['contract'], stop_size, multiplier, entry_stop_price, filled_price, price,
                 )
 
             else:
-                price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], filled_price, histData)
+                price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
 
             logging.info("Sending TP Trade EntryData is %s  and Price is %s  and action is BUY",entryData,price)
             sendTakeProfit(connection, entryData, price, "BUY")
@@ -2022,8 +2188,9 @@ async def sendTpSlBuy(connection, entryData):
             chart_Time = datetime.datetime.strptime(str(datetime.datetime.now().date()) + " " + Config.tradingTime,
                                                    "%Y-%m-%d %H:%M:%S")
             stpPrice = get_sl_for_buying(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
-            logging.info(f"minus 0.01 in stop entry is buying {stpPrice}")
+            logging.info(f"BUY stop loss (for SHORT): Base price from get_sl_for_buying={stpPrice}, bar high={entryData['histData'].get('high')}, bar low={entryData['histData'].get('low')}")
             stpPrice = stpPrice + 0.01
+            logging.info(f"BUY stop loss (for SHORT): After +0.01 adjustment={stpPrice}, filled_price={filled_price}")
             logging.info("Sending STPLOSS Trade EntryData is %s  and Price is %s and action is BUY and hist Data [ %s ]", entryData, stpPrice,histData)
             sendStopLoss(connection, entryData, stpPrice, "BUY")
             mocPrice = 0
@@ -2072,10 +2239,13 @@ def sendStopLoss(connection, entryData,price,action):
 
         if extended_hist_supported:
             stop_size, entry_offset, protection_offset = _calculate_stop_limit_offsets(hist_data)
+            logging.info(f"Extended hours stop-limit calculation: action={action}, bar high={hist_data.get('high')}, bar low={hist_data.get('low')}, stop_size={stop_size}, protection_offset={protection_offset}")
             if action.upper() == "BUY":
                 limit_price = adjusted_price + protection_offset
+                logging.info(f"BUY stop loss (SHORT position): stop={adjusted_price}, limit={limit_price} (stop + {protection_offset})")
             else:
                 limit_price = adjusted_price - protection_offset
+                logging.info(f"SELL stop loss (LONG position): stop={adjusted_price}, limit={limit_price} (stop - {protection_offset})")
 
             order_type = "STP LMT"
             order_kwargs['orderType'] = "STP LMT"
@@ -2235,8 +2405,12 @@ async def sendTpSlSell(connection, entryData):
                 # histData = entryData['histData']
             price = 0
             filled_price = Config.orderFilledPrice.get(entryData['orderId'])
-            logging.info("In TPSL %s contract  and for %s histdata",
-                         entryData['contract'], histData)
+            # Use entry stop price (lastPrice) instead of filled price for take profit calculation
+            entry_stop_price = entryData.get('lastPrice', filled_price)
+            if entry_stop_price is None:
+                entry_stop_price = filled_price
+            logging.info("In TPSL %s contract  and for %s histdata. Entry stop price=%s, Filled price=%s",
+                         entryData['contract'], histData, entry_stop_price, filled_price)
             if (entryData['barType'] == Config.entryTradeType[3]) or (entryData['barType'] == Config.entryTradeType[4]) or (entryData['barType'] == Config.entryTradeType[5]):
                 candleData = connection.getDailyCandle(entryData['contract'])
                 if (candleData == None or len(candleData) < 1):
@@ -2259,17 +2433,17 @@ async def sendTpSlSell(connection, entryData):
 
                 multiplier = multiplier_map.get(entryData['profit'])
                 if multiplier is not None:
-                    price = float(filled_price) + (multiplier * stop_size)
+                    price = float(entry_stop_price) + (multiplier * stop_size)
                 else:
                     price = float(histData['high'])
 
                 price = round(price, Config.roundVal)
                 logging.info(
-                    "Extended TP calculation (sell) %s stop_size=%s multiplier=%s filled=%s price=%s",
-                    entryData['contract'], stop_size, multiplier, filled_price, price,
+                    "Extended TP calculation (sell/LONG) %s stop_size=%s multiplier=%s entry_stop_price=%s filled_price=%s price=%s",
+                    entryData['contract'], stop_size, multiplier, entry_stop_price, filled_price, price,
                 )
             else:
-                price = get_tp_for_selling(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], filled_price, histData)
+                price = get_tp_for_selling(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
 
             logging.info("Sending TP Trade EntryData is %s  and Price is %s  and action is SELL", entryData, price)
             sendTakeProfit(connection, entryData, price, "SELL")

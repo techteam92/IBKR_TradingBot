@@ -25,6 +25,169 @@ addButton = None
 IbConn = None
 scrollable_frame=None
 
+def _show_entry_price_modal(trade_type_combo, entry_points_entry, order_type_name):
+    """
+    Show a modal dialog to enter entry price for Limit Order or Stop Order.
+    """
+    # Get parent window from the combobox
+    parent = trade_type_combo.winfo_toplevel()
+    
+    # Create modal dialog
+    modal = tkinter.Toplevel(parent)
+    modal.title(f"{order_type_name} - Entry Price")
+    modal.geometry("300x150")
+    modal.resizable(False, False)
+    modal.transient(parent)  # Make it modal relative to parent
+    modal.grab_set()  # Make it modal
+    
+    # Center the dialog
+    modal.update_idletasks()
+    x = (modal.winfo_screenwidth() // 2) - (300 // 2)
+    y = (modal.winfo_screenheight() // 2) - (150 // 2)
+    modal.geometry(f"300x150+{x}+{y}")
+    
+    # Get current value if any
+    current_value = entry_points_entry.get() if entry_points_entry.get() else "0"
+    
+    # Store previous selection index
+    previous_index = 0  # Default to first option
+    if hasattr(trade_type_combo, '_previous_index'):
+        previous_index = trade_type_combo._previous_index
+    
+    # Label
+    Label(modal, text=f"Enter Entry Price for {order_type_name}:", font=(Config.fontName2, Config.fontSize2)).pack(pady=10)
+    
+    # Entry field
+    value_var = StringVar(modal, value=current_value)
+    entry_widget = Entry(modal, textvariable=value_var, width=15, font=(Config.fontName2, Config.fontSize2))
+    entry_widget.pack(pady=5)
+    entry_widget.select_range(0, END)
+    entry_widget.focus()
+    
+    # Buttons frame
+    button_frame = Frame(modal)
+    button_frame.pack(pady=10)
+    
+    def save_value():
+        try:
+            val = value_var.get().strip()
+            if val:
+                float(val)  # Validate it's a number
+                entry_points_entry.delete(0, END)
+                entry_points_entry.insert(0, val)
+            else:
+                entry_points_entry.delete(0, END)
+                entry_points_entry.insert(0, "0")
+            modal.destroy()
+        except ValueError:
+            tkinter.messagebox.showerror("Invalid Input", "Please enter a valid number")
+            entry_widget.focus()
+    
+    def cancel_dialog():
+        # Reset to previous selection if cancelled
+        modal.destroy()
+        trade_type_combo.current(previous_index)
+    
+    Button(button_frame, text="OK", width=8, command=save_value).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Cancel", width=8, command=cancel_dialog).pack(side=LEFT, padx=5)
+    
+    # Bind Enter key to save
+    entry_widget.bind("<Return>", lambda e: save_value())
+    entry_widget.bind("<Escape>", lambda e: cancel_dialog())
+    
+    # Wait for modal to close
+    modal.wait_window()
+
+def _show_custom_stop_loss_modal(stop_loss_combo, value_entry):
+    """
+    Show a modal dialog to enter custom stop loss value when "Custom" is selected.
+    """
+    # Get parent window from the combobox
+    parent = stop_loss_combo.winfo_toplevel()
+    
+    # Create modal dialog
+    modal = tkinter.Toplevel(parent)
+    modal.title("Custom Stop Loss")
+    modal.geometry("300x150")
+    modal.resizable(False, False)
+    modal.transient(parent)  # Make it modal relative to parent
+    modal.grab_set()  # Make it modal
+    
+    # Center the dialog
+    modal.update_idletasks()
+    x = (modal.winfo_screenwidth() // 2) - (300 // 2)
+    y = (modal.winfo_screenheight() // 2) - (150 // 2)
+    modal.geometry(f"300x150+{x}+{y}")
+    
+    # Get current value if any
+    current_value = value_entry.get() if value_entry.get() else "0"
+    
+    # Store previous selection index (before "Custom" was selected)
+    # Since we're already on "Custom", we need to track what was before
+    # We'll default to 0 (EntryBar) if we can't determine
+    previous_index = 0  # Default to EntryBar
+    # Try to find a stored previous index, or use default
+    if hasattr(stop_loss_combo, '_previous_index'):
+        previous_index = stop_loss_combo._previous_index
+    
+    # Label
+    Label(modal, text="Enter Custom Stop Loss Value:", font=(Config.fontName2, Config.fontSize2)).pack(pady=10)
+    
+    # Entry field
+    value_var = StringVar(modal, value=current_value)
+    entry_widget = Entry(modal, textvariable=value_var, width=15, font=(Config.fontName2, Config.fontSize2))
+    entry_widget.pack(pady=5)
+    entry_widget.select_range(0, END)
+    entry_widget.focus()
+    
+    # Buttons frame
+    button_frame = Frame(modal)
+    button_frame.pack(pady=10)
+    
+    def save_value():
+        try:
+            val = value_var.get().strip()
+            if val:
+                float(val)  # Validate it's a number
+                value_entry.delete(0, END)
+                value_entry.insert(0, val)
+            else:
+                value_entry.delete(0, END)
+                value_entry.insert(0, "0")
+            modal.destroy()
+        except ValueError:
+            tkinter.messagebox.showerror("Invalid Input", "Please enter a valid number")
+            entry_widget.focus()
+    
+    def cancel_dialog():
+        # Reset to previous selection if cancelled
+        modal.destroy()
+        stop_loss_combo.current(previous_index)
+    
+    Button(button_frame, text="OK", width=8, command=save_value).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Cancel", width=8, command=cancel_dialog).pack(side=LEFT, padx=5)
+    
+    # Bind Enter key to save
+    entry_widget.bind("<Return>", lambda e: save_value())
+    entry_widget.bind("<Escape>", lambda e: cancel_dialog())
+    
+    # Wait for modal to close
+    modal.wait_window()
+
+def _update_stop_loss_value_field(stop_loss_combo, value_entry, reset_value=False):
+    """
+    Handle stop loss selection change. Shows modal for Custom option.
+    """
+    selection = stop_loss_combo.get()
+    if selection == Config.stopLoss[-1]:  # "Custom"
+        # Store the current index before showing modal (which is already "Custom")
+        # We'll track the previous index inside the modal function
+        _show_custom_stop_loss_modal(stop_loss_combo, value_entry)
+    else:
+        if reset_value:
+            value_entry.delete(0, END)
+            value_entry.insert(0, "0")
+
 def getScrollableframe(frame):
     container = Frame(frame)
     canvas = Canvas(container, width=1200, height=610)
@@ -84,9 +247,10 @@ def NewTradeFrame(frame,connection):
     timeInForcelbl.config(width=10)
     timeInForcelbl.pack(side=LEFT)
 
-    timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Entry Point", justify=LEFT)
-    timeInForcelbl.config(width=10)
-    timeInForcelbl.pack(side=LEFT)
+    # Entry Point label is hidden since the field is now modal-based
+    # timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Entry Point", justify=LEFT)
+    # timeInForcelbl.config(width=10)
+    # timeInForcelbl.pack(side=LEFT)
 
     buySelllbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Buy/Sell", justify=LEFT)
     buySelllbl.config(width=10)
@@ -185,9 +349,14 @@ def add():
     status[len(status) - 1].delete(0, END)
     status[len(status) - 1].insert(0, "Execute")
     loop = asyncio.get_event_loop()
+    current_sl_value = "0"
+    if len(stopLossValue) > 0:
+        current_sl_value = stopLossValue[len(stopLossValue) - 1].get()
+        if current_sl_value == "":
+            current_sl_value = "0"
     x = asyncio.ensure_future(SendTrade(IbConn,symbol[len(symbol) - 1].get(),timeFrame[len(timeFrame) - 1].get(),takeProfit[len(takeProfit) - 1].get(),
               stopLoss[len(stopLoss) - 1].get(),risk[len(risk) - 1].get(),timeInForce[len(timeInForce) - 1].get(),tradeType[len(tradeType) - 1].get(),
-                                    buySell[len(buySell) - 1].get(),atr[len(atr) - 1].get(),0,Config.pullBackNo , 0,
+                                    buySell[len(buySell) - 1].get(),atr[len(atr) - 1].get(),0,Config.pullBackNo , current_sl_value,
                                         breakEven[len(breakEven) - 1].get() , outsideRth,entry_points[len(entry_points) - 1].get()  ))
 
     but = cancelButton[len(cancelButton) - 1]
@@ -212,10 +381,14 @@ def addOldCache():
             timeFrame[len(timeFrame) - 1].current(Config.timeFrame.index(value.get("timeFrame")))
             takeProfit[len(takeProfit) - 1].current(Config.takeProfit.index(value.get("profit")))
             stopLoss[len(stopLoss) - 1].current(Config.stopLoss.index(value.get("stopLoss")))
-            # if value.get("stopLossValue")==None:
-            #     stopLossValue[len(stopLossValue) - 1].insert(0,"0")
-            # else:
-            #     stopLossValue[len(stopLossValue) - 1].insert(0, value.get("stopLossValue"))
+            if len(stopLossValue) > 0:
+                stopLossValue[len(stopLossValue) - 1].config(state="normal")
+                stopLossValue[len(stopLossValue) - 1].delete(0, END)
+                if value.get("slValue")==None:
+                    stopLossValue[len(stopLossValue) - 1].insert(0,"0")
+                else:
+                    stopLossValue[len(stopLossValue) - 1].insert(0, value.get("slValue"))
+                _update_stop_loss_value_field(stopLoss[len(stopLoss) - 1], stopLossValue[len(stopLossValue) - 1], reset_value=False)
             if value.get("entry_points")==None:
                 entry_points[len(entry_points) - 1].insert(0,"0")
             else:
@@ -272,11 +445,33 @@ def addField(rowYPosition):
     setDefaultStp(stpLossEntry)
     stopLoss.append(stpLossEntry)
 
-    # stopLossValueEntry = Entry(field, width="10", textvariable=StringVar(field))
-    # stopLossValueEntry.config(width=10)
-    # stopLossValueEntry.pack(side=LEFT, padx=9)
-    # setDefaultstopLossValue(stopLossValueEntry)
-    # stopLossValue.append(stopLossValueEntry)
+    # Hidden entry field to store custom stop loss value (not displayed in UI)
+    stopLossValueEntry = Entry(field, width="0", textvariable=StringVar(field))
+    stopLossValueEntry.config(width=0)
+    stopLossValueEntry.pack(side=LEFT, padx=0)
+    stopLossValueEntry.pack_forget()  # Hide it completely
+    setDefaultstopLossValue(stopLossValueEntry)
+    stopLossValue.append(stopLossValueEntry)
+    # Store previous index tracking (use a list to allow modification in closure)
+    previous_index_storage = [stpLossEntry.current()]
+    
+    # Ensure entry reflects the initial selection
+    _update_stop_loss_value_field(stpLossEntry, stopLossValueEntry, reset_value=False)
+    
+    def on_stop_loss_change(event):
+        combo = stpLossEntry
+        value_entry = stopLossValueEntry
+        current_selection = combo.get()
+        # If selecting Custom, store the previous index
+        if current_selection == Config.stopLoss[-1]:
+            # The previous index is what was stored before this change
+            combo._previous_index = previous_index_storage[0]
+        else:
+            # Update stored previous index for next time
+            previous_index_storage[0] = combo.current()
+        _update_stop_loss_value_field(combo, value_entry, reset_value=True)
+    
+    stpLossEntry.bind("<<ComboboxSelected>>", on_stop_loss_change)
 
     breakEvenEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.breakEven)
     breakEvenEntry.config(width=10)
@@ -301,11 +496,35 @@ def addField(rowYPosition):
     setDefaultEntryType(tradeTypeEntry)
     tradeType.append(tradeTypeEntry)
 
-    entry_pointValueEntry = Entry(field, width="10", textvariable=StringVar(field))
-    entry_pointValueEntry.config(width=10)
-    entry_pointValueEntry.pack(side=LEFT, padx=9)
+    # Hidden entry field to store entry price value (not displayed in UI)
+    entry_pointValueEntry = Entry(field, width="0", textvariable=StringVar(field))
+    entry_pointValueEntry.config(width=0)
+    entry_pointValueEntry.pack(side=LEFT, padx=0)
+    entry_pointValueEntry.pack_forget()  # Hide it completely
     setDefaultEntryPointValue(entry_pointValueEntry)
     entry_points.append(entry_pointValueEntry)
+    
+    # Store previous index tracking for trade type (use a list to allow modification in closure)
+    previous_trade_type_index = [tradeTypeEntry.current()]
+    
+    def on_trade_type_change(event):
+        combo = tradeTypeEntry
+        entry_points_entry = entry_pointValueEntry
+        current_selection = combo.get()
+        # If selecting Limit Order or Stop Order, show modal
+        if current_selection in Config.manualOrderTypes:
+            # The previous index is what was stored before this change
+            combo._previous_index = previous_trade_type_index[0]
+            order_type_name = current_selection
+            _show_entry_price_modal(combo, entry_points_entry, order_type_name)
+        else:
+            # Update stored previous index for next time
+            previous_trade_type_index[0] = combo.current()
+            # Reset entry points for non-manual order types
+            entry_points_entry.delete(0, END)
+            entry_points_entry.insert(0, "0")
+    
+    tradeTypeEntry.bind("<<ComboboxSelected>>", on_trade_type_change)
 
     buysellEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.buySell)
     buysellEntry.config(width=10)
@@ -378,7 +597,7 @@ def disableEntryState():
     timeFrame[len(timeFrame) - 1].config(state="disabled")
     takeProfit[len(takeProfit) - 1].config(state="disabled")
     stopLoss[len(stopLoss) - 1].config(state="disabled")
-    # stopLossValue[len(stopLossValue) - 1].config(state="disabled")
+    stopLossValue[len(stopLossValue) - 1].config(state="disabled")
     entry_points[len(entry_points) - 1].config(state="disabled")
     tradeType[len(tradeType) - 1].config(state="disabled")
     timeInForce[len(timeInForce) - 1].config(state="disabled")
