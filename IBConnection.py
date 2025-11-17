@@ -13,6 +13,8 @@ class connection:
 
     def __init__(self):
         self.ib = IB()
+        self._order_id_lock = threading.Lock()
+        self._order_id_counter = None
 
     # it will set trade order status value in global variable.
     def orderStatusEvent(self,trade: Trade):
@@ -37,9 +39,38 @@ class connection:
             self.pnlEvent = self.pnlData
             # self.ib.pendingTickersEvent += self.onPendingTickers
             # self.reqPnl()
+            self._initialize_order_ids()
         except Exception as e:
             logging.error("Error in ib connection " + str(e))
             return False
+
+    def _initialize_order_ids(self):
+        """Fetch the next valid order id from IB."""
+        try:
+            self.ib.reqIds(1)
+            start = time.time()
+            while getattr(self.ib.client, "orderIdSeq", None) is None:
+                if time.time() - start > 5:
+                    break
+                self.ib.waitOnUpdate(timeout=1)
+            next_id = getattr(self.ib.client, "orderIdSeq", None)
+            if next_id is None:
+                next_id = int(time.time())
+                logging.warning("nextValidId not received, defaulting order id seed to %s", next_id)
+            with self._order_id_lock:
+                self._order_id_counter = int(next_id)
+        except Exception as err:
+            logging.error("Unable to initialize order ids: %s", err)
+            with self._order_id_lock:
+                self._order_id_counter = int(time.time())
+
+    def get_next_order_id(self):
+        with self._order_id_lock:
+            if self._order_id_counter is None:
+                self._order_id_counter = int(time.time())
+            next_id = self._order_id_counter
+            self._order_id_counter += 1
+            return next_id
     def reqPnl(self):
         try:
             print("req pnl initializing...")

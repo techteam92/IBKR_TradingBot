@@ -3,6 +3,7 @@ import asyncio
 from header import *
 from DefaultSetting import *
 from SendTrade import *
+from SendTrade import _get_latest_hist_bar
 symbol=[]
 timeFrame=[]
 takeProfit=[]
@@ -348,6 +349,30 @@ def add():
 
     status[len(status) - 1].delete(0, END)
     status[len(status) - 1].insert(0, "Execute")
+
+    # Log latest bar high/low whenever Add is clicked (premarket/after-hours audit)
+    try:
+        current_symbol = symbol[len(symbol) - 1].get()
+        current_timeframe = timeFrame[len(timeFrame) - 1].get()
+        contract = getContract(current_symbol, None)
+        hist_bar = _get_latest_hist_bar(IbConn, contract, current_timeframe)
+        if hist_bar:
+            logging.info(
+                "Add button snapshot -> symbol=%s timeframe=%s high=%s low=%s",
+                current_symbol,
+                current_timeframe,
+                hist_bar.get("high"),
+                hist_bar.get("low")
+            )
+        else:
+            logging.warning(
+                "Add button snapshot -> unable to fetch bar for %s %s",
+                current_symbol,
+                current_timeframe
+            )
+    except Exception as snapshot_err:
+        logging.error("Add button snapshot error: %s", snapshot_err)
+
     loop = asyncio.get_event_loop()
     current_sl_value = "0"
     if len(stopLossValue) > 0:
