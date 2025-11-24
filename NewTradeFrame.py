@@ -19,6 +19,7 @@ entry_points = []
 atr=[]
 quantity=[]
 cancelButton = []
+row_async_tasks = []
 
 rowPosition=0
 buttonRely=0.3
@@ -180,7 +181,7 @@ def _update_stop_loss_value_field(stop_loss_combo, value_entry, reset_value=Fals
     Handle stop loss selection change. Shows modal for Custom option.
     """
     selection = stop_loss_combo.get()
-    if selection == Config.stopLoss[-1]:  # "Custom"
+    if selection == "Custom":  # "Custom"
         # Store the current index before showing modal (which is already "Custom")
         # We'll track the previous index inside the modal function
         _show_custom_stop_loss_modal(stop_loss_combo, value_entry)
@@ -191,22 +192,30 @@ def _update_stop_loss_value_field(stop_loss_combo, value_entry, reset_value=Fals
 
 def getScrollableframe(frame):
     container = Frame(frame)
-    canvas = Canvas(container, width=1200, height=610)
+    container.pack(fill=BOTH, expand=True)
+
+    canvas = Canvas(container, highlightthickness=0)
+    canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
     scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-    global scrollable_frame
-    scrollable_frame = ttk.Frame(canvas)
-    scrollable_frame.bind(
-        "<Configure>",
-        lambda e: canvas.configure(
-            scrollregion=canvas.bbox("all")
-        )
-    )
-    canvas.create_window((-20, 1), window=scrollable_frame, anchor="nw")
+    scrollbar.pack(side=RIGHT, fill=Y)
+
     canvas.configure(yscrollcommand=scrollbar.set)
 
-    container.pack()
-    canvas.pack(side=LEFT, expand=True)
-    scrollbar.pack(side="left", fill="y")
+    global scrollable_frame
+    scrollable_frame = ttk.Frame(canvas)
+
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    canvas_frame = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+    def _resize_canvas(event):
+        canvas.itemconfig(canvas_frame, width=event.width)
+
+    canvas.bind("<Configure>", _resize_canvas)
 
 def NewTradeFrame(frame,connection):
     logging.info("New Trade Frame Init")
@@ -216,37 +225,34 @@ def NewTradeFrame(frame,connection):
     IbConn = connection
     asyncio.ensure_future(pnl_check(IbConn))
     labelFrame = Frame(scrollable_frame)
+    header_labels = ["Symbol", "Time Frame", "Profit", "Stop Loss", "Break Even",
+                     "Time In Force", "Trade Type", "Buy/Sell", "Risk", "Status", "ATR %", "Cancel"]
+    for col in range(len(header_labels)):
+        labelFrame.columnconfigure(col, weight=1, uniform="header")
     lblSymbol = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Symbol", justify=LEFT)
-    lblSymbol.config(width=10)
-    lblSymbol.pack(side=LEFT)
+    lblSymbol.grid(row=0, column=0, sticky="ew", padx=5)
 
     timeFramelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Time Frame", justify=LEFT)
-    timeFramelbl.config(width=10)
-    timeFramelbl.pack(side=LEFT)
+    timeFramelbl.grid(row=0, column=1, sticky="ew", padx=5)
 
     profitlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Profit", justify=LEFT)
-    profitlbl.config(width=10)
-    profitlbl.pack(side=LEFT)
+    profitlbl.grid(row=0, column=2, sticky="ew", padx=5)
 
     stpLosslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Stop Loss", justify=LEFT)
-    stpLosslbl.config(width=10)
-    stpLosslbl.pack(side=LEFT)
+    stpLosslbl.grid(row=0, column=3, sticky="ew", padx=5)
 
     # stpLossValuelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="SL Value", justify=LEFT)
     # stpLossValuelbl.config(width=10)
     # stpLossValuelbl.pack(side=LEFT)
 
     breakEvenlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Break Even", justify=LEFT)
-    breakEvenlbl.config(width=10)
-    breakEvenlbl.pack(side=LEFT)
+    breakEvenlbl.grid(row=0, column=4, sticky="ew", padx=5)
 
     timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Time In Force", justify=LEFT)
-    timeInForcelbl.config(width=10)
-    timeInForcelbl.pack(side=LEFT)
+    timeInForcelbl.grid(row=0, column=5, sticky="ew", padx=5)
 
     timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Trade Type", justify=LEFT)
-    timeInForcelbl.config(width=10)
-    timeInForcelbl.pack(side=LEFT)
+    timeInForcelbl.grid(row=0, column=6, sticky="ew", padx=5)
 
     # Entry Point label is hidden since the field is now modal-based
     # timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Entry Point", justify=LEFT)
@@ -254,38 +260,33 @@ def NewTradeFrame(frame,connection):
     # timeInForcelbl.pack(side=LEFT)
 
     buySelllbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Buy/Sell", justify=LEFT)
-    buySelllbl.config(width=10)
-    buySelllbl.pack(side=LEFT)
+    buySelllbl.grid(row=0, column=7, sticky="ew", padx=5)
 
     risklbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Risk", justify=LEFT)
-    risklbl.config(width=9)
-    risklbl.pack(side=LEFT)
+    risklbl.grid(row=0, column=8, sticky="ew", padx=5)
 
     # risklbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Quantity", justify=LEFT)
     # risklbl.config(width=9)
     # risklbl.pack(side=LEFT)
 
     statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
-    statuslbl.config(width=9)
-    statuslbl.pack(side=LEFT)
+    statuslbl.grid(row=0, column=9, sticky="ew", padx=5)
 
     atrlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="ATR %", justify=LEFT)
-    atrlbl.config(width=9)
-    atrlbl.pack(side=LEFT)
+    atrlbl.grid(row=0, column=10, sticky="ew", padx=5)
 
     # statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Pre/Post", justify=LEFT)
     # statuslbl.config(width=9)
     # statuslbl.pack(side=LEFT)
 
     statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Cancel", justify=LEFT)
-    statuslbl.config(width=9)
-    statuslbl.pack(side=LEFT)
+    statuslbl.grid(row=0, column=11, sticky="ew", padx=5)
 
 
-    labelFrame.pack()
+    labelFrame.pack(fill=X, padx=10, pady=5)
 
     addOldCache()
-    addField(0)
+    addField(0, "")
 
     # global defaultSetting
     # defaultSetting = Button(frame, width="18", height="1", text="Setting", command=Setting)
@@ -335,30 +336,18 @@ def checkLastTradingTime():
 
 def add():
     print("new row adding.")
-    global rowPosition
-    global buttonRely
-    global status
-    if checkLastTradingTime():
-        tkinter.messagebox.showinfo('Error', "We can not place entry trade. Trading closed...")
-        return
+    addField(0, "")
 
-    # Auto-detect outsideRth based on current session
-    session = _get_current_session()
-    outsideRth = session in ('PREMARKET', 'AFTERHOURS', 'OVERNIGHT')
-    logging.info(f"Auto-detected session: {session}, outsideRth: {outsideRth}")
 
-    status[len(status) - 1].delete(0, END)
-    status[len(status) - 1].insert(0, "Execute")
-
-    # Log latest bar high/low whenever Add is clicked (premarket/after-hours audit)
+def _log_snapshot_for_row(row_index):
     try:
-        current_symbol = symbol[len(symbol) - 1].get()
-        current_timeframe = timeFrame[len(timeFrame) - 1].get()
+        current_symbol = symbol[row_index].get()
+        current_timeframe = timeFrame[row_index].get()
         contract = getContract(current_symbol, None)
         hist_bar = _get_latest_hist_bar(IbConn, contract, current_timeframe)
         if hist_bar:
             logging.info(
-                "Add button snapshot -> symbol=%s timeframe=%s high=%s low=%s",
+                "Execute snapshot -> symbol=%s timeframe=%s high=%s low=%s",
                 current_symbol,
                 current_timeframe,
                 hist_bar.get("high"),
@@ -366,40 +355,97 @@ def add():
             )
         else:
             logging.warning(
-                "Add button snapshot -> unable to fetch bar for %s %s",
+                "Execute snapshot -> unable to fetch bar for %s %s",
                 current_symbol,
                 current_timeframe
             )
     except Exception as snapshot_err:
-        logging.error("Add button snapshot error: %s", snapshot_err)
+        logging.error("Execute snapshot error: %s", snapshot_err)
 
-    loop = asyncio.get_event_loop()
+
+def _set_status(row_index, text):
+    status_entry = status[row_index]
+    status_entry.config(state="normal")
+    status_entry.delete(0, END)
+    status_entry.insert(0, text)
+    status_entry.config(state="disabled")
+
+
+def execute_row(row_index):
+    if checkLastTradingTime():
+        tkinter.messagebox.showinfo('Error', "We can not place entry trade. Trading closed...")
+        return
+
+    session = _get_current_session()
+    outsideRth = session in ('PREMARKET', 'AFTERHOURS', 'OVERNIGHT')
+    logging.info("Execute row %s detected session: %s, outsideRth: %s", row_index, session, outsideRth)
+
+    current_tif = timeInForce[row_index].get()
+    if outsideRth and current_tif != 'OTH':
+        tkinter.messagebox.showerror(
+            'Error',
+            f"Orders outside trading hours (premarket/after-hours) require 'OTH' (Outside Trading Hours) in Time In Force.\n"
+            f"Current session: {session}\n"
+            f"Please select 'OTH' in Time In Force and try again.")
+        logging.warning(
+            f"Order rejected for row {row_index}: outsideRth={outsideRth}, session={session}, "
+            f"but Time In Force is '{current_tif}' instead of 'OTH'")
+        return
+
+    _set_status(row_index, "Sent")
+    _log_snapshot_for_row(row_index)
+
     current_sl_value = "0"
-    if len(stopLossValue) > 0:
-        current_sl_value = stopLossValue[len(stopLossValue) - 1].get()
+    if len(stopLossValue) > row_index:
+        current_sl_value = stopLossValue[row_index].get()
         if current_sl_value == "":
             current_sl_value = "0"
-    x = asyncio.ensure_future(SendTrade(IbConn,symbol[len(symbol) - 1].get(),timeFrame[len(timeFrame) - 1].get(),takeProfit[len(takeProfit) - 1].get(),
-              stopLoss[len(stopLoss) - 1].get(),risk[len(risk) - 1].get(),timeInForce[len(timeInForce) - 1].get(),tradeType[len(tradeType) - 1].get(),
-                                    buySell[len(buySell) - 1].get(),atr[len(atr) - 1].get(),0,Config.pullBackNo , current_sl_value,
-                                        breakEven[len(breakEven) - 1].get() , outsideRth,entry_points[len(entry_points) - 1].get()  ))
 
-    but = cancelButton[len(cancelButton) - 1]
-    but['command'] = lambda arg1=x,arg2=but,arg3=status[len(status) - 1]: cancelEntryTrade(arg1,arg2,arg3)
+    send_future = asyncio.ensure_future(
+        SendTrade(
+            IbConn,
+            symbol[row_index].get(),
+            timeFrame[row_index].get(),
+            takeProfit[row_index].get(),
+            stopLoss[row_index].get(),
+            risk[row_index].get(),
+            timeInForce[row_index].get(),
+            tradeType[row_index].get(),
+            buySell[row_index].get(),
+            atr[row_index].get(),
+            0,
+            Config.pullBackNo,
+            current_sl_value,
+            breakEven[row_index].get(),
+            outsideRth,
+            entry_points[row_index].get(),
+        )
+    )
 
-    disableEntryState()
+    row_async_tasks[row_index] = send_future
+    disableEntryState(row_index)
 
-    # rowPosition = rowPosition + 30
-    # buttonRely = buttonRely + 0.07
-    # addButton.place(relx=0.5, rely=buttonRely, anchor=CENTER)
-    addField(0)
+    button = cancelButton[row_index]
+    button.config(text="Cancel")
+    button['command'] = lambda idx=row_index: cancel_row(idx)
+    # Keep button enabled so user can cancel if needed
+
+
+def cancel_row(row_index):
+    async_task = row_async_tasks[row_index]
+    butObj = cancelButton[row_index]
+    statusObj = status[row_index]
+    cancelEntryTrade(async_task, butObj, statusObj)
+    row_async_tasks[row_index] = None
+    _set_status(row_index, "Canceled")
+    butObj.config(state="disabled")
 
 
 def addOldCache():
     for key in Config.orderStatusData:
         value = Config.orderStatusData.get(key)
         if value.get("ordType") == "Entry":
-            addField(0)
+            addField(0, "Sent")
             symbol[len(symbol) - 1].delete(0, END)
             symbol[len(symbol) - 1].insert(0, value.get("usersymbol"))
 
@@ -430,42 +476,44 @@ def addOldCache():
             # else:
             #     outsideRTH[len(outsideRTH) - 1].insert(0, value.get("outsideRTH"))
 
-            status[len(status) - 1].delete(0, END)
-            status[len(status) - 1].insert(0, "Execute")
-
-            disableEntryState()
-
-
+            disableEntryState(len(status) - 1)
+            row_idx = len(cancelButton) - 1
+            cancelButton[row_idx].config(text="Cancel")
+            cancelButton[row_idx]['command'] = lambda idx=row_idx: cancel_row(idx)
 
 
-def addField(rowYPosition):
+
+
+def addField(rowYPosition, initial_status_text=""):
     logging.info("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
+    for col in range(12):
+        field.columnconfigure(col, weight=1, uniform="row")
     firstEntry = Entry(field, width="10", textvariable=StringVar(field))
 
     firstEntry.config(width=10)
-    firstEntry.pack(side=LEFT,padx=9)
+    firstEntry.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
     setDefaultSymbol(firstEntry)
     symbol.append(firstEntry)
 
     secEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeFrame)
     secEntry.config(width=10)
-    secEntry.pack(side=LEFT,padx=9)
+    secEntry.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
     secEntry.current(0)
     setDefaultTimeFrame(secEntry)
     timeFrame.append(secEntry)
 
     profitEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.takeProfit)
     profitEntry.config(width=10)
-    profitEntry.pack(side=LEFT,padx=9)
+    profitEntry.grid(row=0, column=2, sticky="ew", padx=5, pady=2)
     profitEntry.current(0)
     setDefaultProfit(profitEntry)
     takeProfit.append(profitEntry)
 
     stpLossEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.stopLoss)
     stpLossEntry.config(width=10)
-    stpLossEntry.pack(side=LEFT,padx=9)
+    stpLossEntry.grid(row=0, column=3, sticky="ew", padx=5, pady=2)
     stpLossEntry.current(0)
     setDefaultStp(stpLossEntry)
     stopLoss.append(stpLossEntry)
@@ -473,8 +521,8 @@ def addField(rowYPosition):
     # Hidden entry field to store custom stop loss value (not displayed in UI)
     stopLossValueEntry = Entry(field, width="0", textvariable=StringVar(field))
     stopLossValueEntry.config(width=0)
-    stopLossValueEntry.pack(side=LEFT, padx=0)
-    stopLossValueEntry.pack_forget()  # Hide it completely
+    stopLossValueEntry.grid(row=0, column=3, padx=0, pady=0)
+    stopLossValueEntry.grid_remove()  # Hide it completely
     setDefaultstopLossValue(stopLossValueEntry)
     stopLossValue.append(stopLossValueEntry)
     # Store previous index tracking (use a list to allow modification in closure)
@@ -488,7 +536,7 @@ def addField(rowYPosition):
         value_entry = stopLossValueEntry
         current_selection = combo.get()
         # If selecting Custom, store the previous index
-        if current_selection == Config.stopLoss[-1]:
+        if current_selection == "Custom":
             # The previous index is what was stored before this change
             combo._previous_index = previous_index_storage[0]
         else:
@@ -500,7 +548,7 @@ def addField(rowYPosition):
 
     breakEvenEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.breakEven)
     breakEvenEntry.config(width=10)
-    breakEvenEntry.pack(side=LEFT, padx=9)
+    breakEvenEntry.grid(row=0, column=4, sticky="ew", padx=5, pady=2)
     breakEvenEntry.current(0)
     setDefaultbreakEvenEntryType(breakEvenEntry)
     breakEven.append(breakEvenEntry)
@@ -508,7 +556,7 @@ def addField(rowYPosition):
 
     timeForceEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeInForce)
     timeForceEntry.config(width=10)
-    timeForceEntry.pack(side=LEFT,padx=9)
+    timeForceEntry.grid(row=0, column=5, sticky="ew", padx=5, pady=2)
     timeForceEntry.current(0)
     setDefaultTif(timeForceEntry)
     timeInForce.append(timeForceEntry)
@@ -516,7 +564,7 @@ def addField(rowYPosition):
 
     tradeTypeEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.entryTradeType)
     tradeTypeEntry.config(width=10)
-    tradeTypeEntry.pack(side=LEFT,padx=9)
+    tradeTypeEntry.grid(row=0, column=6, sticky="ew", padx=5, pady=2)
     tradeTypeEntry.current(0)
     setDefaultEntryType(tradeTypeEntry)
     tradeType.append(tradeTypeEntry)
@@ -524,8 +572,8 @@ def addField(rowYPosition):
     # Hidden entry field to store entry price value (not displayed in UI)
     entry_pointValueEntry = Entry(field, width="0", textvariable=StringVar(field))
     entry_pointValueEntry.config(width=0)
-    entry_pointValueEntry.pack(side=LEFT, padx=0)
-    entry_pointValueEntry.pack_forget()  # Hide it completely
+    entry_pointValueEntry.grid(row=0, column=6, padx=0, pady=0)
+    entry_pointValueEntry.grid_remove()  # Hide it completely
     setDefaultEntryPointValue(entry_pointValueEntry)
     entry_points.append(entry_pointValueEntry)
     
@@ -553,7 +601,7 @@ def addField(rowYPosition):
 
     buysellEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.buySell)
     buysellEntry.config(width=10)
-    buysellEntry.pack(side=LEFT,padx=9)
+    buysellEntry.grid(row=0, column=7, sticky="ew", padx=5, pady=2)
     buysellEntry.current(0)
     setDefaultBuySell(buysellEntry)
     buySell.append(buysellEntry)
@@ -562,7 +610,7 @@ def addField(rowYPosition):
 
     riskEntry = Entry(field, width="10", textvariable=StringVar(field))
     riskEntry.config(width=10)
-    riskEntry.pack(side=LEFT,padx=9)
+    riskEntry.grid(row=0, column=8, sticky="ew", padx=5, pady=2)
     setDefaultRisk(riskEntry)
     risk.append(riskEntry)
 
@@ -576,14 +624,15 @@ def addField(rowYPosition):
     statusVar = StringVar(field)
     statusEntry = Entry(field, width="9", textvariable=statusVar)
     statusEntry.config(width=9)
-    statusEntry.pack(side=LEFT,padx=9)
+    statusEntry.grid(row=0, column=9, sticky="ew", padx=5, pady=2)
     status.append(statusEntry)
+    _set_status(len(status) - 1, initial_status_text)
 
     atrVar = StringVar(field,Config.atrValue)
     atrEntry = Entry(field, width="9", textvariable=atrVar)
     atrEntry.config(width=9)
     setDefaultAtr(atrEntry)
-    atrEntry.pack(side=LEFT,padx=9)
+    atrEntry.grid(row=0, column=10, sticky="ew", padx=5, pady=2)
     atr.append(atrEntry)
 
     # outsideRTHEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.prePostBool)
@@ -593,14 +642,17 @@ def addField(rowYPosition):
     # setDefaultoutsideRTH(outsideRTHEntry)
     # outsideRTH.append(outsideRTHEntry)
 
+    row_index = len(symbol) - 1
+    row_async_tasks.append(None)
+
     butCancle = Frame(field)
-    but = Button(field, width="10", height="1", text="Cancel")
-    but['command'] = lambda arg1=None, arg2=None, arg3=None: cancelEntryTrade(arg1, arg2, arg3)
-    but.pack(side=LEFT, padx=9)
+    but = Button(field, width="10", height="1", text="Execute")
+    but['command'] = lambda idx=row_index: execute_row(idx)
+    but.grid(row=0, column=11, sticky="ew", padx=5, pady=2)
     cancelButton.append(but)
 
 
-    field.pack(side=TOP,pady=8)
+    field.pack(side=TOP, pady=8, fill=X, expand=True)
 
 
 
@@ -617,21 +669,42 @@ def cancelEntryTrade(asyncObj,butObj,statusObj):
         statusObj.config(state="disabled")
         tkinter.messagebox.showinfo('Success', "Successfully Canceled")
 
-def disableEntryState():
-    symbol[len(symbol) - 1].config(state="disabled")
-    timeFrame[len(timeFrame) - 1].config(state="disabled")
-    takeProfit[len(takeProfit) - 1].config(state="disabled")
-    stopLoss[len(stopLoss) - 1].config(state="disabled")
-    stopLossValue[len(stopLossValue) - 1].config(state="disabled")
-    entry_points[len(entry_points) - 1].config(state="disabled")
-    tradeType[len(tradeType) - 1].config(state="disabled")
-    timeInForce[len(timeInForce) - 1].config(state="disabled")
-    risk[len(risk) - 1].config(state="disabled")
-    status[len(status) - 1].config(state="disabled")
-    buySell[len(buySell) - 1].config(state="disabled")
-    atr[len(atr) - 1].config(state="disabled")
-    # outsideRTH[len(outsideRTH) - 1].config(state="disabled")
-    # quantity[len(quantity) - 1].config(state="disabled")
+def disableEntryState(row_index=None):
+    if row_index is None:
+        row_index = len(symbol) - 1
+    # Disable all Entry fields
+    symbol[row_index].config(state="disabled")
+    risk[row_index].config(state="disabled")
+    status[row_index].config(state="disabled")
+    atr[row_index].config(state="disabled")
+    stopLossValue[row_index].config(state="disabled")
+    entry_points[row_index].config(state="disabled")
+    
+    # Disable all Combobox fields (use "disabled" for ttk.Combobox to prevent any interaction)
+    timeFrame[row_index].config(state="disabled")
+    takeProfit[row_index].config(state="disabled")
+    stopLoss[row_index].config(state="disabled")
+    tradeType[row_index].config(state="disabled")
+    timeInForce[row_index].config(state="disabled")
+    buySell[row_index].config(state="disabled")
+    breakEven[row_index].config(state="disabled")
+    # outsideRTH[row_index].config(state="disabled")
+    # quantity[row_index].config(state="disabled")
+
+
+def enableEntryState(row_index):
+    symbol[row_index].config(state="normal")
+    timeFrame[row_index].config(state="readonly")
+    takeProfit[row_index].config(state="readonly")
+    stopLoss[row_index].config(state="readonly")
+    stopLossValue[row_index].config(state="normal")
+    entry_points[row_index].config(state="normal")
+    tradeType[row_index].config(state="readonly")
+    timeInForce[row_index].config(state="readonly")
+    risk[row_index].config(state="normal")
+    status[row_index].config(state="normal")
+    buySell[row_index].config(state="readonly")
+    atr[row_index].config(state="normal")
 
 
 

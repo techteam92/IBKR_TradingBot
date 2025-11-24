@@ -33,8 +33,13 @@ class TkApp:
     def dialog(self):
         self.frame.title(Config.title)
         self.frame.protocol("WM_DELETE_WINDOW", self.close_window)
-        self.frame.geometry(
-            "%dx%d+%d+%d" % (1200, 620, (self.frame.winfo_screenwidth() / 2) - 400, (self.frame.winfo_screenheight() / 2) - 350))
+        window_width = 1200
+        window_height = 620
+        screen_width = self.frame.winfo_screenwidth()
+        screen_height = self.frame.winfo_screenheight()
+        pos_x = int((screen_width - window_width) / 2)
+        pos_y = int((screen_height - window_height) / 2)
+        self.frame.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
         menubar = Menu(self.frame, borderwidth=1, bg="#20232A")
         menubar.add_command(label="Manage Position", command=self.openManagePosition)
         menubar.add_command(label="Setting", command=self.Setting)

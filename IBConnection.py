@@ -18,7 +18,6 @@ class connection:
 
     # it will set trade order status value in global variable.
     def orderStatusEvent(self,trade: Trade):
-        logging.info("Order Status for orderId=" + str(trade.order.orderId) + " ,status=" + str(trade.orderStatus.status)+" ,Order Status for permid="+str(trade.order.permId))
         if  trade.orderStatus.status == 'Filled':
             Config.orderFilledPrice.update({ trade.order.orderId :  trade.orderStatus.avgFillPrice })
 
@@ -26,13 +25,20 @@ class connection:
             data = Config.orderStatusData.get(trade.order.orderId)
             data.update({'status': trade.orderStatus.status})
             Config.orderStatusData.update({trade.order.orderId: data})
-            if data['barType'] != Config.entryTradeType[0]:
-                sendTpAndSl(self,data)
+            # Exclude manual orders (Stop Order, Limit Order) from sendTpAndSl during regular hours
+            # because they already send bracket orders. Extended hours manual orders need sendTpAndSl.
+            is_manual_order = data.get('barType', '') in Config.manualOrderTypes
+            is_extended_hours = data.get('outsideRth', False)
+            should_send_tp_sl = (
+                data['barType'] != Config.entryTradeType[0] and
+                not (is_manual_order and not is_extended_hours)  # Skip manual orders in regular hours
+            )
+            if should_send_tp_sl:
+                sendTpAndSl(self, data)
 
     # tws connection stablish
     def connect(self):
         try:
-            logging.info("We are connecting with TWS")
             self.ib.connect(host=Config.host, port=Config.port, clientId=Config.clientId)
             # self.ib.waitOnUpdate()
             self.ib.orderStatusEvent += self.orderStatusEvent
@@ -47,22 +53,39 @@ class connection:
     def _initialize_order_ids(self):
         """Fetch the next valid order id from IB."""
         try:
-            self.ib.reqIds(1)
+            # In ib_insync, reqIds is on the client object, not the IB object
+            if hasattr(self.ib.client, 'reqIds'):
+                self.ib.client.reqIds(1)
+            else:
+                # Alternative: wait for nextValidId to be set automatically
+                logging.info("reqIds not available, waiting for nextValidId from connection")
+            
             start = time.time()
+            # Wait for orderIdSeq to be populated (this is set when nextValidId is received)
             while getattr(self.ib.client, "orderIdSeq", None) is None:
                 if time.time() - start > 5:
                     break
                 self.ib.waitOnUpdate(timeout=1)
+            
             next_id = getattr(self.ib.client, "orderIdSeq", None)
             if next_id is None:
-                next_id = int(time.time())
-                logging.warning("nextValidId not received, defaulting order id seed to %s", next_id)
+                # Fallback: try to get nextValidId directly if available
+                if hasattr(self.ib, 'nextValidOrderId') and self.ib.nextValidOrderId:
+                    next_id = self.ib.nextValidOrderId
+                else:
+                    next_id = int(time.time())
+                    logging.warning("nextValidId not received, defaulting order id seed to %s", next_id)
+            else:
+                logging.info("Order ID initialized from orderIdSeq: %s", next_id)
+            
             with self._order_id_lock:
                 self._order_id_counter = int(next_id)
         except Exception as err:
             logging.error("Unable to initialize order ids: %s", err)
+            # Fallback to time-based ID
             with self._order_id_lock:
                 self._order_id_counter = int(time.time())
+                logging.warning("Using time-based order ID seed: %s", self._order_id_counter)
 
     def get_next_order_id(self):
         with self._order_id_lock:
@@ -126,7 +149,6 @@ class connection:
     # place trade on tws
     def placeTrade(self, contract, order , outsideRth =False):
         # nest_asyncio.apply()
-        logging.info("Going to Send Trade For " + str(order))
         session = self._get_current_session()
         logging.info("placeTrade: session=%s, outsideRth=%s, orderType=%s", session, outsideRth, order.orderType)
         
@@ -204,8 +226,39 @@ class connection:
                 # Pre-market / After-hours: allow same types as RTH, no conversion
                 logging.info("%s session: passing order type %s without conversion", session, order.orderType)
 
-        response = self.ib.placeOrder(contract=contract, order=order)
-        return response
+        # Check if a Trade already exists for this order ID and handle it
+        # This prevents AssertionError when ib_insync detects an order in done state
+        try:
+            existing_trades = self.ib.trades()
+            # ib.trades() returns a dict-like object keyed by order ID
+            if order.orderId and hasattr(existing_trades, '__contains__') and order.orderId in existing_trades:
+                existing_trade = existing_trades[order.orderId]
+                if hasattr(existing_trade, 'orderStatus') and existing_trade.orderStatus.status in ['Filled', 'Cancelled', 'Inactive']:
+                    logging.warning("Order ID %s already has a Trade in done state (%s). This may cause issues.", 
+                                  order.orderId, existing_trade.orderStatus.status)
+                    # Try to remove it from the trades collection
+                    try:
+                        if hasattr(existing_trades, '__delitem__'):
+                            del existing_trades[order.orderId]
+                            logging.info("Removed existing done Trade for orderId %s", order.orderId)
+                    except Exception as e:
+                        logging.warning("Could not remove existing Trade for orderId %s: %s", order.orderId, e)
+        except Exception as e:
+            logging.debug("Error checking existing trades: %s (this is usually fine)", e)
+        
+        try:
+            response = self.ib.placeOrder(contract=contract, order=order)
+            return response
+        except AssertionError as e:
+            # This happens when ib_insync detects the order is already in a done state
+            # Usually means the order ID was reused or there's a cached Trade object
+            error_msg = f"AssertionError placing order {order.orderId}: Order may already be in a done state. " \
+                       f"This can happen if order IDs are reused. Try again with a new order ID."
+            logging.error(error_msg)
+            logging.error("Order details: orderId=%s, orderType=%s, action=%s, status=%s", 
+                         order.orderId, order.orderType, order.action, 
+                         getattr(self.ib.trades().get(order.orderId, None), 'orderStatus.status', 'N/A') if order.orderId in self.ib.trades() else 'N/A')
+            raise Exception(error_msg) from e
 
     def _get_price_for_overnight_order(self, contract, action):
         """Get price for overnight order - tries multiple methods"""
@@ -369,8 +422,11 @@ class connection:
     def getDailyCandle(self, ibcontract):
         try:
             nest_asyncio.apply()
-            logging.info("we are getting 10 days candle data for %s contract ", ibcontract)
-            histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr='15 D', barSizeSetting='1 day',
+            # Request enough days for ATR calculation: atrPeriod (20) + buffer for weekends/holidays
+            # Request 40 days to ensure we have at least 21 trading days
+            duration_days = max(40, Config.atrPeriod + 20)  # At least 40 days, or atrPeriod + 20
+            logging.info("we are getting %s days candle data for %s contract (ATR period=%s)", duration_days, ibcontract, Config.atrPeriod)
+            histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr=f'{duration_days} D', barSizeSetting='1 day',
                                                  useRTH=False)
 
             return histData
