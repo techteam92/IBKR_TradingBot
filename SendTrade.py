@@ -204,7 +204,7 @@ def _calculate_manual_stop_loss(connection, contract, entry_price, stop_loss_typ
                      contract, entry_price, atr_value, atr_percent, stop_size if atr_value else 'N/A', stop_loss_price)
     
     # Custom stop loss
-    elif stop_loss_type == Config.stopLoss[-1]:  # 'Custom'
+    elif stop_loss_type == Config.stopLoss[1]:  # 'Custom'
         custom_value = _to_float(sl_value, 0)
         if custom_value == 0:
             raise ValueError("Custom stop loss requires a valid value")
@@ -627,7 +627,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         histData = None
         tradeType = ""
         # Always get chartTime - needed for stop size calculation and price data
-            chartTime = getRecentChartTime(timeFrame)
+        chartTime = getRecentChartTime(timeFrame)
         
         if Config.historicalData.get(key) == None:
             # chartTime = datetime.datetime.now()
@@ -873,8 +873,15 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         # Config.rbbb_dict.update({key:response.order})
         # sendEntryTrade(connection, ibContract, tradeType, quantity, histData, lastPrice, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,slValue,breakEven,outsideRth)
         logging.info("rb_and_rbb entry order done %s ",symbol)
-        if barType == Config.entryTradeType[2]:
+        # Only RBB (entryTradeType[4]) should continuously update stop price
+        # RB (entryTradeType[3]) should have fixed stop price - no updates
+        logging.info("RB/RBB check: barType=%s, entryTradeType[3]=%s (RB), entryTradeType[4]=%s (RBB)", 
+                    barType, Config.entryTradeType[3], Config.entryTradeType[4])
+        if barType == Config.entryTradeType[4]:
+            logging.info("RBB detected: Starting rbb_loop_run for continuous stop price updates")
             await rbb_loop_run(connection,key,response.order)
+        else:
+            logging.info("RB detected (barType=%s): Fixed stop price, NOT calling rbb_loop_run", barType)
         break
 
 async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
@@ -912,23 +919,52 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                 stop_loss_price = entry_price + stop_size
             stop_loss_price = round(stop_loss_price, Config.roundVal)
         else:
-            try:
-                raw_stop_loss_price = _calculate_manual_stop_loss(
-                    connection, contract, entry_price, stopLoss, buySellType, timeFrame, slValue
-                )
-            except ValueError as err:
-                logging.error("Error calculating stop loss for manual limit order: %s", err)
-                return
-            
-            stop_size = abs(entry_price - raw_stop_loss_price)
-            if stop_size == 0 or math.isnan(stop_size):
-                logging.error("Stop size invalid (%s) for manual limit order %s", stop_size, symbol)
-                return
-            if buySellType == 'BUY':
-                stop_loss_price = entry_price - stop_size
+            # For Custom stop loss, calculate stop_size directly (similar to ATR logic and stop orders)
+            if stopLoss == Config.stopLoss[1]:  # 'Custom'
+                custom_stop = _to_float(slValue, 0)
+                if custom_stop == 0:
+                    logging.error("Custom stop loss requires a valid value for %s limit order %s", stopLoss, symbol)
+                    return
+                # Validate custom stop loss value
+                if buySellType == 'BUY':
+                    if custom_stop >= entry_price:
+                        logging.error("Custom stop loss (%s) must be below entry price (%s) for BUY orders", custom_stop, entry_price)
+                        return
+                else:  # SELL
+                    if custom_stop <= entry_price:
+                        logging.error("Custom stop loss (%s) must be above entry price (%s) for SELL orders", custom_stop, entry_price)
+                        return
+                # Calculate stop_size directly (similar to ATR): stop_size = |entry - custom_stop|
+                stop_size = abs(entry_price - custom_stop)
+                if stop_size == 0 or math.isnan(stop_size):
+                    logging.error("Stop size invalid (%s) for custom stop loss %s limit order %s", stop_size, custom_stop, symbol)
+                    return
+                logging.info("Custom stop loss for %s limit order: entry=%s, custom_stop=%s, stop_size=%s", symbol, entry_price, custom_stop, stop_size)
+                # Calculate stop_loss_price from entry_price (similar to ATR logic)
+                if buySellType == 'BUY':
+                    stop_loss_price = entry_price - stop_size
+                else:
+                    stop_loss_price = entry_price + stop_size
+                stop_loss_price = round(stop_loss_price, Config.roundVal)
             else:
-                stop_loss_price = entry_price + stop_size
-            stop_loss_price = round(stop_loss_price, Config.roundVal)
+                # For other stop loss types (EntryBar, HOD, LOD, etc.), use existing logic
+                try:
+                    raw_stop_loss_price = _calculate_manual_stop_loss(
+                        connection, contract, entry_price, stopLoss, buySellType, timeFrame, slValue
+                    )
+                except ValueError as err:
+                    logging.error("Error calculating stop loss for manual limit order: %s", err)
+                    return
+                
+                stop_size = abs(entry_price - raw_stop_loss_price)
+                if stop_size == 0 or math.isnan(stop_size):
+                    logging.error("Stop size invalid (%s) for manual limit order %s", stop_size, symbol)
+                    return
+                if buySellType == 'BUY':
+                    stop_loss_price = entry_price - stop_size
+                else:
+                    stop_loss_price = entry_price + stop_size
+                stop_loss_price = round(stop_loss_price, Config.roundVal)
         
         # Calculate quantity based on risk and stop size
         risk_amount = _to_float(risk, 0)
@@ -985,12 +1021,29 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
             )
             
             # Place ONLY entry order - TP and SL will be sent after fill via sendTpAndSl()
-            entry_response = connection.placeTrade(contract=contract, order=entry_order, outsideRth=outsideRth)
-            StatusUpdate(entry_response, 'Entry', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
-                         timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
-                         breakEven, outsideRth)
-            
-            logging.info("Extended hours: Entry LMT order placed. TP and SL will be sent automatically after entry fills.")
+            try:
+                logging.info("Placing limit order: orderId=%s, orderType=LMT, action=%s, quantity=%s, limitPrice=%s, tif=%s, outsideRth=%s",
+                            parent_order_id, buySellType, qty, entry_price, tif, outsideRth)
+                entry_response = connection.placeTrade(contract=contract, order=entry_order, outsideRth=outsideRth)
+                if entry_response is None:
+                    logging.error("placeTrade returned None for limit order %s", symbol)
+                    return
+                logging.info("placeTrade successful: orderId=%s, status=%s", 
+                            entry_response.order.orderId, entry_response.orderStatus.status)
+                StatusUpdate(entry_response, 'Entry', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
+                             timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                             breakEven, outsideRth)
+                
+                # Store stop_size in orderStatusData for use in sendStopLoss (only for Custom stop loss Limit Orders)
+                if stopLoss == Config.stopLoss[1] and int(entry_response.order.orderId) in Config.orderStatusData:  # Only for Custom stop loss
+                    Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
+                    logging.info(f"Stored stop_size={stop_size} in orderStatusData for Custom stop loss Limit Order {entry_response.order.orderId}")
+                
+                logging.info("Extended hours: Entry LMT order placed. TP and SL will be sent automatically after entry fills.")
+            except Exception as place_error:
+                logging.error("Error placing limit order for %s: %s", symbol, place_error)
+                logging.error("Traceback: %s", traceback.format_exc())
+                raise  # Re-raise to be caught by outer exception handler
         else:
             # Regular market hours: Send bracket orders (Entry LMT, TP LMT, SL STP)
             # Generate separate unique order IDs for each order in the bracket
@@ -1099,23 +1152,52 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 stop_loss_price = actual_entry_price + stop_size
             stop_loss_price = round(stop_loss_price, Config.roundVal)
         else:
-            try:
-                raw_stop_loss_price = _calculate_manual_stop_loss(
-                    connection, contract, entry_price, stopLoss, buySellType, timeFrame, slValue
-                )
-            except ValueError as err:
-                logging.error("Error calculating stop loss for manual stop order: %s", err)
-                return
-            
-            stop_size = abs(entry_price - raw_stop_loss_price)
-            if stop_size == 0 or math.isnan(stop_size):
-                logging.error("Stop size invalid (%s) for manual stop order %s", stop_size, symbol)
-                return
-            if buySellType == 'BUY':
-                stop_loss_price = actual_entry_price - stop_size
+            # For Custom stop loss, calculate stop_size directly (similar to ATR logic)
+            if stopLoss == Config.stopLoss[1]:  # 'Custom'
+                custom_stop = _to_float(slValue, 0)
+                if custom_stop == 0:
+                    logging.error("Custom stop loss requires a valid value for %s stop order %s", stopLoss, symbol)
+                    return
+                # Validate custom stop loss value
+                if buySellType == 'BUY':
+                    if custom_stop >= entry_price:
+                        logging.error("Custom stop loss (%s) must be below entry price (%s) for BUY orders", custom_stop, entry_price)
+                        return
+                else:  # SELL
+                    if custom_stop <= entry_price:
+                        logging.error("Custom stop loss (%s) must be above entry price (%s) for SELL orders", custom_stop, entry_price)
+                        return
+                # Calculate stop_size directly (similar to ATR): stop_size = |entry - custom_stop|
+                stop_size = abs(entry_price - custom_stop)
+                if stop_size == 0 or math.isnan(stop_size):
+                    logging.error("Stop size invalid (%s) for custom stop loss %s stop order %s", stop_size, custom_stop, symbol)
+                    return
+                logging.info("Custom stop loss for %s stop order: entry=%s, custom_stop=%s, stop_size=%s", symbol, entry_price, custom_stop, stop_size)
+                # Calculate stop_loss_price from actual_entry_price (similar to ATR logic)
+                if buySellType == 'BUY':
+                    stop_loss_price = actual_entry_price - stop_size
+                else:
+                    stop_loss_price = actual_entry_price + stop_size
+                stop_loss_price = round(stop_loss_price, Config.roundVal)
             else:
-                stop_loss_price = actual_entry_price + stop_size
-            stop_loss_price = round(stop_loss_price, Config.roundVal)
+                # For other stop loss types (EntryBar, HOD, LOD, etc.), use existing logic
+                try:
+                    raw_stop_loss_price = _calculate_manual_stop_loss(
+                        connection, contract, entry_price, stopLoss, buySellType, timeFrame, slValue
+                    )
+                except ValueError as err:
+                    logging.error("Error calculating stop loss for manual stop order: %s", err)
+                    return
+                
+                stop_size = abs(entry_price - raw_stop_loss_price)
+                if stop_size == 0 or math.isnan(stop_size):
+                    logging.error("Stop size invalid (%s) for manual stop order %s", stop_size, symbol)
+                    return
+                if buySellType == 'BUY':
+                    stop_loss_price = actual_entry_price - stop_size
+                else:
+                    stop_loss_price = actual_entry_price + stop_size
+                stop_loss_price = round(stop_loss_price, Config.roundVal)
 
         risk_amount = _to_float(risk, 0)
         if risk_amount is None or math.isnan(risk_amount) or risk_amount <= 0:
@@ -1156,26 +1238,46 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
         
         if is_extended:
             # Extended hours (premarket/after-hours) for Stop Order:
-            # Entry: STP (Stop Order - keep original type, do NOT change to STP LMT)
+            # ALL Stop Orders in extended hours should use STP LMT (Stop-Limit Order)
+            # Stop price = entry_price, Limit price = entry_price ± 0.5 × stop_size
             # Stop Loss: STP LMT with stop = entry ± stop_size, limit = entry ± 2×stop_size
             # Take Profit: LMT (same as others)
             
-            logging.info(f"Extended hours Stop Order: entry trigger={entry_price}, stop_size={stop_size} (entry order type remains STP)")
+            # For ALL stop orders in extended hours: Entry should be STP LMT
+            # Validate stop_size before calculating limit offset
+            if stop_size <= 0 or math.isnan(stop_size):
+                logging.error(f"Invalid stop_size={stop_size} for extended hours Stop Order: symbol={symbol}, stopLoss={stopLoss}, entry_price={entry_price}")
+                return
             
-            # Entry order as STP (Stop Order - keep original type, do NOT change)
+            entry_limit_offset = round(stop_size * 0.5, Config.roundVal)
+            # Ensure minimum limit offset to allow order execution
+            min_limit_offset = 0.01  # Minimum $0.01 offset
+            if entry_limit_offset < min_limit_offset:
+                entry_limit_offset = min_limit_offset
+                logging.warning(f"Stop size too small ({stop_size}), using minimum limit offset={min_limit_offset} for {symbol}")
+            
+            if buySellType == 'BUY':
+                limit_price = entry_price + entry_limit_offset
+            else:  # SELL
+                limit_price = entry_price - entry_limit_offset
+            limit_price = round(limit_price, Config.roundVal)
+            
+            logging.info(f"Extended hours Stop Order: Entry STP LMT - Stop={entry_price}, Limit={limit_price} (stop ± 0.5×stop_size={entry_limit_offset}), stop_size={stop_size}, stopLoss={stopLoss}, symbol={symbol}")
+            
             entry_order = Order(
                 orderId=parent_order_id,
-                orderType="STP",
+                orderType="STP LMT",
                 action=buySellType,
                 totalQuantity=qty,
                 auxPrice=entry_price,  # Stop trigger price
+                lmtPrice=limit_price,  # Limit price
                 tif=tif,
                 transmit=True  # Transmit immediately - TP/SL will be sent after fill
             )
             
             # Place ONLY entry order - TP and SL will be sent after fill via sendTpAndSl()
             entry_response = connection.placeTrade(contract=contract, order=entry_order, outsideRth=outsideRth)
-            StatusUpdate(entry_response, 'Entry', contract, 'STP', buySellType, qty, histData, entry_price, symbol,
+            StatusUpdate(entry_response, 'Entry', contract, 'STP LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
             
@@ -1184,7 +1286,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
                 logging.info(f"Stored stop_size={stop_size} in orderStatusData for order {entry_response.order.orderId}")
             
-            logging.info("Extended hours: Entry STP order placed (type unchanged). TP and SL will be sent automatically after entry fills.")
+            logging.info("Extended hours: Entry STP LMT order placed (all stop orders use stop-limit in extended hours). TP and SL will be sent automatically after entry fills.")
         else:
             # Regular market hours: Send bracket orders (Entry STP, TP LMT, SL STP)
             # Generate separate unique order IDs for each order in the bracket
@@ -1333,20 +1435,44 @@ async def rbb_loop_run(connection,key,entry_order):
                     await asyncio.sleep(1)
                     continue
                 else:
+                    # Get the original bar's datetime from initial entry
+                    original_histData = old_order.get('histData', {})
+                    if not original_histData:
+                        # No original data, skip update
+                        logging.info("RBBB: No original histData found, skipping update")
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    original_bar_datetime = original_histData.get('dateTime')
+                    new_bar_datetime = histData.get('dateTime')
+                    
+                    # Check if a new bar has closed (different datetime)
+                    if original_bar_datetime and new_bar_datetime:
+                        if original_bar_datetime == new_bar_datetime:
+                            # Same bar, no update needed
+                            logging.info("RBBB: Same bar (datetime=%s), skipping update", new_bar_datetime)
+                            await asyncio.sleep(1)
+                            continue
+                        else:
+                            # New bar closed, update to new bar's high/low
+                            logging.info("RBBB: New bar closed (original=%s, new=%s), updating stop price", original_bar_datetime, new_bar_datetime)
+                    else:
+                        # Can't compare datetimes, skip update
+                        logging.info("RBBB: Cannot compare bar datetimes, skipping update")
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    # Calculate new stop price based on new bar's high/low
                     aux_price = 0
                     if old_order['userBuySell'] == 'BUY':
-                        aux_price = histData['high']
-                        logging.info("RBRR auxprice high for  %s ", aux_price)
+                        aux_price = histData['high'] + 0.01
+                        logging.info("RBRR auxprice high for %s (new bar high=%s)", aux_price, histData['high'])
                     else:
-                        aux_price = histData['low']
-                        logging.info("RBRR auxprice low for  %s ", aux_price)
-
+                        aux_price = histData['low'] - 0.01
+                        logging.info("RBRR auxprice low for %s (new bar low=%s)", aux_price, histData['low'])
+                    
                     logging.info("RBBB going to update stp price for  newprice %s old_order %s", aux_price,order)
                     logging.info(f"rb aux limit price befor 0.01 plus minus aux {aux_price}")
-                    if (old_order['userBuySell'] == 'BUY'):
-                        aux_price = aux_price + 0.01
-                    else:
-                        aux_price = aux_price - 0.01
                     order.auxPrice = aux_price
                     old_orderId=order.orderId
                     
@@ -1720,9 +1846,9 @@ async def lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
             limit_price = round(limit_price, Config.roundVal)
             logging.info(f"LB1 Pre-market/After-hours {tradeType}: Stop={aux_price}, Limit={limit_price}")
 
-        response = connection.placeTrade(contract=ibContract,
-                                           order=Order(orderType=order_type, action=tradeType, totalQuantity=quantity,
-                                                       tif=tif, auxPrice=aux_price, lmtPrice=limit_price), outsideRth=outsideRth)
+            response = connection.placeTrade(contract=ibContract,
+                                               order=Order(orderType=order_type, action=tradeType, totalQuantity=quantity,
+                                                           tif=tif, auxPrice=aux_price, lmtPrice=limit_price), outsideRth=outsideRth)
         else:
             # Regular hours: use regular STP order
             response = connection.placeTrade(contract=ibContract,
@@ -2250,8 +2376,6 @@ def _get_current_session():
 async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points):
     try:
         symbol=symbol.upper()
-        if  barType == Config.entryTradeType[3]:
-            barType = Config.entryTradeType[2]
         if entry_points == "":
             entry_points = 0
         logging.info("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s",  symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points)
@@ -2277,7 +2401,7 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         if outsideRth:
             if session in ('PREMARKET', 'AFTERHOURS'):
                 # Only allow RB/RBB and manual order types
-                allowed_types = (Config.entryTradeType[1], Config.entryTradeType[2]) + MANUAL_ORDER_TYPES
+                allowed_types = (Config.entryTradeType[3], Config.entryTradeType[4]) + MANUAL_ORDER_TYPES
                 if barType not in allowed_types:
                     logging.info("%s session: Only RB/RBB or manual orders allowed; skipping barType %s", session, barType)
                     return
@@ -2299,7 +2423,7 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             return
         if barType == Config.entryTradeType[0]:
             await (first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
-        elif barType == Config.entryTradeType[1] or barType == Config.entryTradeType[2]:
+        elif barType == Config.entryTradeType[3] or barType == Config.entryTradeType[4]:
             await (rb_and_rbb(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[3] or barType == Config.entryTradeType[5]:
             await (pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
@@ -2515,7 +2639,7 @@ def get_sl_for_selling(connection,stoploss_type,filled_price, histData,slValue ,
         else:
             logging.warning("ATR stop loss offset missing for %s, falling back to EntryBar", stoploss_type)
 
-    if stoploss_type == Config.stopLoss[-1]:
+    if stoploss_type == Config.stopLoss[1]:  # 'Custom'
         custom_price = _to_float(slValue, 0)
         if custom_price == 0:
             logging.warning("Custom stop loss value missing for %s, falling back to entry price", contract)
@@ -2607,7 +2731,7 @@ def get_sl_for_buying(connection,stoploss_type,filled_price, histData,slValue ,c
         else:
             logging.warning("ATR stop loss offset missing for %s, falling back to EntryBar", stoploss_type)
 
-    if stoploss_type == Config.stopLoss[-1]:
+    if stoploss_type == Config.stopLoss[1]:  # 'Custom'
         custom_price = _to_float(slValue, 0)
         if custom_price == 0:
             logging.warning("Custom stop loss value missing for %s, falling back to entry price", contract)
@@ -2710,14 +2834,44 @@ def TpSlForFB(connection,ibcontract,tradeType,quantity,histData,lastPrice, symbo
 
 def sendTpAndSl(connection, entryData):
     try:
+        logging.info("sendTpAndSl called: status=%s, ordType=%s, barType=%s, orderId=%s, outsideRth=%s",
+                    entryData.get('status'), entryData.get('ordType'), entryData.get('barType'), 
+                    entryData.get('orderId'), entryData.get('outsideRth'))
+        
         if (entryData['status'] == "Filled" and entryData['ordType'] == "Entry"):
-            loop = asyncio.get_event_loop()
-            if (entryData['action'] == "BUY"):
-                logging.info("Market order filled we will send buy Order, market data is %s",entryData)
-                asyncio.ensure_future(sendTpSlSell(connection, entryData))
-            else:
-                logging.info("Market order filled we will send sell Order, market data is %s",entryData)
-                asyncio.ensure_future(sendTpSlBuy(connection, entryData))
+            bar_type = entryData.get('barType', '')
+            is_manual_order = bar_type in Config.manualOrderTypes
+            is_extended_hours = entryData.get('outsideRth', False)
+            logging.info("Entry order filled - barType=%s, is_manual_order=%s, is_extended_hours=%s, action=%s, orderId=%s", 
+                        bar_type, is_manual_order, is_extended_hours, entryData.get('action'), entryData.get('orderId'))
+            
+            try:
+                # Use nest_asyncio to allow nested event loops
+                nest_asyncio.apply()
+                loop = asyncio.get_event_loop()
+                
+                def task_done_callback(task):
+                    try:
+                        if task.exception():
+                            logging.error("TP/SL async task failed with exception: %s", task.exception())
+                            logging.error("Traceback: %s", traceback.format_exc())
+                    except Exception as e:
+                        logging.error("Error in task_done_callback: %s", e)
+                
+                if (entryData['action'] == "BUY"):
+                    logging.info("Market order filled we will send buy Order, market data is %s",entryData)
+                    future = asyncio.ensure_future(sendTpSlSell(connection, entryData))
+                    future.add_done_callback(task_done_callback)
+                    logging.info("Scheduled sendTpSlSell future: %s", future)
+                else:
+                    logging.info("Market order filled we will send sell Order, market data is %s",entryData)
+                    future = asyncio.ensure_future(sendTpSlBuy(connection, entryData))
+                    future.add_done_callback(task_done_callback)
+                    logging.info("Scheduled sendTpSlBuy future: %s", future)
+            except Exception as e:
+                logging.error("Error scheduling TP/SL async function: %s", e)
+                logging.error("Traceback: %s", traceback.format_exc())
+                traceback.print_exc()
 
         if ( (entryData['status'] == "Filled") and ((entryData['ordType'] == "StopLoss") or (entryData['ordType'] == "TakeProfit")) ):
             parentData = entryData['entryData']
@@ -2733,13 +2887,40 @@ def sendTpAndSl(connection, entryData):
 
 async def sendTpSlBuy(connection, entryData):
     try:
+        logging.info("sendTpSlBuy called for barType=%s, stopLoss=%s, orderId=%s, action=%s", 
+                     entryData.get('barType'), entryData.get('stopLoss'), entryData.get('orderId'), entryData.get('action'))
+        logging.info("sendTpSlBuy entryData keys: %s", list(entryData.keys()))
         #  entry sell so buy tp sl order
         max_retries = 5  # Limit retries to avoid infinite loop
         retry_count = 0
         while True:
             histData = None
-            if entryData['barType'] == Config.entryTradeType[0] or entryData['barType'] == Config.entryTradeType[1] or entryData['barType'] == Config.entryTradeType[2]  or entryData['barType'] == Config.entryTradeType[6] or entryData['barType'] == Config.entryTradeType[7] or entryData['barType'] == Config.entryTradeType[8]:
+            # Check if this is a manual order (Stop Order or Limit Order)
+            is_manual_order = entryData.get('barType', '') in Config.manualOrderTypes
+            
+            if entryData['barType'] == Config.entryTradeType[0] or entryData['barType'] == Config.entryTradeType[1] or entryData['barType'] == Config.entryTradeType[2] or entryData['barType'] == Config.entryTradeType[3] or entryData['barType'] == Config.entryTradeType[4] or entryData['barType'] == Config.entryTradeType[6] or entryData['barType'] == Config.entryTradeType[7] or entryData['barType'] == Config.entryTradeType[8]:
                 histData = entryData['histData']
+            elif is_manual_order:
+                # For manual orders, try to use stored histData first, otherwise create fallback immediately
+                histData = entryData.get('histData')
+                if not histData or not isinstance(histData, dict) or 'high' not in histData:
+                    # Create fallback histData from filled price immediately (no retries needed)
+                    filled_price = Config.orderFilledPrice.get(entryData['orderId'])
+                    if filled_price is None:
+                        filled_price = entryData.get('lastPrice', 0)
+                    if filled_price > 0:
+                        # Create a minimal histData with 1% range around filled price
+                        histData = {
+                            'high': filled_price * 1.005,
+                            'low': filled_price * 0.995,
+                            'close': filled_price
+                        }
+                        logging.info("Manual Order: Using fallback histData from filled price: %s", histData)
+                    else:
+                        logging.error("Manual Order: Cannot create fallback histData: filled_price is invalid")
+                        # Don't break - continue with None histData, the custom stop loss logic doesn't need it
+                else:
+                    logging.info("Manual Order: Using stored histData: %s", histData)
             else:
                 chartTime = getRecentChartTime(entryData['timeFrame'])
                 histData = connection.getHistoricalChartData(entryData['contract'], entryData['timeFrame'], chartTime)
@@ -2770,12 +2951,41 @@ async def sendTpSlBuy(connection, entryData):
 
             price = 0
             filled_price = Config.orderFilledPrice.get(entryData['orderId'])
+            if filled_price is None:
+                filled_price = entryData.get('lastPrice', 0)
+            if filled_price is None or filled_price == 0:
+                # Also check entryData for avgFillPrice or fillPrice
+                filled_price = entryData.get('avgFillPrice', 0)
+                if filled_price == 0:
+                    filled_price = entryData.get('fillPrice', 0)
+            if filled_price == 0 or filled_price is None:
+                logging.warning("Manual Order: filled_price is 0 or None, waiting for fill price. OrderId=%s, retry=%s/%s, orderFilledPrice keys=%s", 
+                             entryData.get('orderId'), retry_count, max_retries, list(Config.orderFilledPrice.keys()))
+                if retry_count >= max_retries:
+                    logging.error("Manual Order: Max retries reached, cannot proceed without filled_price. Using entry_stop_price as fallback.")
+                    # Use entry_stop_price as fallback for custom stop loss
+                    if entryData.get('barType') in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:
+                        filled_price = entryData.get('lastPrice', entryData.get('entryPrice', 0))
+                        logging.warning("Manual Order Custom: Using entry_stop_price=%s as filled_price fallback", filled_price)
+                        if filled_price == 0:
+                            logging.error("Manual Order Custom: Cannot proceed - no valid price available")
+                            break
+                    else:
+                        logging.error("Manual Order: Cannot proceed without filled_price and no fallback available")
+                        break
+                else:
+                    retry_count += 1
+                    await asyncio.sleep(0.5)
+                    continue
+            
             # Use entry stop price (lastPrice) instead of filled price for take profit calculation
             entry_stop_price = entryData.get('lastPrice', filled_price)
-            if entry_stop_price is None:
+            if entry_stop_price is None or entry_stop_price == 0:
                 entry_stop_price = filled_price
-            logging.info("In TPSL %s contract  and for %s histdata. Entry stop price=%s, Filled price=%s",
-                         entryData['contract'], histData, entry_stop_price, filled_price)
+            logging.info("In TPSL %s contract  and for %s histdata. Entry stop price=%s, Filled price=%s, barType=%s, stopLoss=%s",
+                         entryData['contract'], histData, entry_stop_price, filled_price, entryData.get('barType'), entryData.get('stopLoss'))
+            
+            # Skip RB/RBB section for manual orders - they have their own logic
             if (entryData['barType'] == Config.entryTradeType[3]) or (entryData['barType'] == Config.entryTradeType[4]) or (entryData['barType'] == Config.entryTradeType[5]):
                 candleData = connection.getDailyCandle(entryData['contract'])
                 if (candleData == None or len(candleData) < 1):
@@ -2784,10 +2994,44 @@ async def sendTpSlBuy(connection, entryData):
                     continue
                 logging.info(" Candle Data for takeProfit %s and contract is %s", candleData[-1], entryData['contract'])
 
-                try:
-                    stop_size, _, _ = _calculate_stop_limit_offsets(histData)
-                except Exception:
-                    stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                # Check if stop loss is ATR-based or Custom - use same stop_size as entry and stop loss
+                stop_loss_type = entryData.get('stopLoss')
+                if stop_loss_type in Config.atrStopLossMap:
+                    # Use ATR stop_size for take profit (same as entry and stop loss)
+                    atr_offset = _get_atr_stop_offset(connection, entryData['contract'], stop_loss_type)
+                    if atr_offset is not None and atr_offset > 0:
+                        stop_size = atr_offset
+                        logging.info(f"RB/RBB ATR TP (SHORT): Using ATR stop_size={stop_size} for take profit")
+                    else:
+                        # Fallback to bar-based if ATR unavailable
+                        try:
+                            stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                            logging.warning(f"RB/RBB: ATR unavailable, using bar-based stop_size={stop_size} for TP")
+                        except Exception:
+                            stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                            logging.warning(f"RB/RBB: Using fallback bar-based stop_size={stop_size} for TP")
+                elif stop_loss_type == Config.stopLoss[1]:  # 'Custom'
+                    # Use Custom stop_size for take profit (same as entry and stop loss)
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback to bar-based if custom value missing
+                        try:
+                            stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                            logging.warning(f"RB/RBB: Custom stop loss value missing, using bar-based stop_size={stop_size} for TP")
+                        except Exception:
+                            stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                            logging.warning(f"RB/RBB: Using fallback bar-based stop_size={stop_size} for TP")
+                    else:
+                        # stop_size = |entry - custom_stop|
+                        stop_size = abs(float(entry_stop_price) - custom_stop)
+                        logging.info(f"RB/RBB Custom TP (SHORT): entry={entry_stop_price}, custom_stop={custom_stop}, stop_size={stop_size} for take profit")
+                else:
+                    # Non-ATR, Non-Custom stop loss: use bar-based stop_size (same as entry and stop loss)
+                    try:
+                        stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                    except Exception:
+                        stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                    logging.info(f"RB/RBB bar-based TP (SHORT): Using bar-based stop_size={stop_size} for take profit")
 
                 multiplier_map = {
                     Config.takeProfit[0]: 2,  # "1:1" means 2× stop_size for short positions
@@ -2812,8 +3056,33 @@ async def sendTpSlBuy(connection, entryData):
                 )
 
             else:
+                # Check if this is a manual order (Stop Order or Limit Order) with custom stop loss
+                if entryData['barType'] in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:  # 'Custom'
+                    # Use Custom stop_size for take profit (same as entry and stop loss)
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback to regular calculation if custom value missing
+                        price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
+                        logging.warning(f"Manual Order Custom TP (SHORT): Custom stop loss value missing, using fallback calculation")
+                    else:
+                        # stop_size = |entry - custom_stop|
+                        stop_size = abs(float(entry_stop_price) - custom_stop)
+                        multiplier_map = {
+                            Config.takeProfit[0]: 1,    # 1:1
+                            Config.takeProfit[1]: 1.5,  # 1.5:1
+                            Config.takeProfit[2]: 2,    # 2:1
+                            Config.takeProfit[3]: 2.5,  # 2.5:1
+                        }
+                        if len(Config.takeProfit) > 4:
+                            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
+                        multiplier = multiplier_map.get(entryData['profit'], 1)
+                        # For SHORT position (BUY TP): TP = entry - (multiplier × stop_size)
+                        price = float(entry_stop_price) - (multiplier * stop_size)
+                        price = round(price, Config.roundVal)
+                        logging.info(f"Manual Order Custom TP (SHORT): entry={entry_stop_price}, custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
+                    # Skip further processing for custom stop loss - price is already set
                 # Check if this is a Limit Order with ATR stop loss - use same ATR stop_size for TP
-                if entryData['barType'] == Config.entryTradeType[0] and entryData.get('stopLoss') in Config.atrStopLossMap:
+                elif entryData['barType'] == Config.entryTradeType[0] and entryData.get('stopLoss') in Config.atrStopLossMap:
                     # Use ATR stop_size for take profit calculation (same as entry and stop loss)
                     atr_offset = _get_atr_stop_offset(connection, entryData['contract'], entryData['stopLoss'])
                     if atr_offset is not None and atr_offset > 0:
@@ -2837,8 +3106,44 @@ async def sendTpSlBuy(connection, entryData):
                 else:
                     price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
 
-            logging.info("Sending TP Trade EntryData is %s  and Price is %s  and action is BUY",entryData,price)
-            sendTakeProfit(connection, entryData, price, "BUY")
+            # Ensure price is set before sending TP
+            if price == 0:
+                logging.warning("Manual Order: TP price is 0, checking if custom stop loss. barType=%s, stopLoss=%s", 
+                               entryData.get('barType'), entryData.get('stopLoss'))
+                # Try to calculate fallback TP for custom stop loss
+                if entryData.get('barType') in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop > 0 and entry_stop_price > 0:
+                        stop_size = abs(float(entry_stop_price) - custom_stop)
+                        multiplier_map = {
+                            Config.takeProfit[0]: 1,    # 1:1
+                            Config.takeProfit[1]: 1.5,  # 1.5:1
+                            Config.takeProfit[2]: 2,    # 2:1
+                            Config.takeProfit[3]: 2.5,  # 2.5:1
+                        }
+                        if len(Config.takeProfit) > 4:
+                            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
+                        multiplier = multiplier_map.get(entryData.get('profit'), 2.0)  # Default 2:1
+                        price = float(entry_stop_price) - (multiplier * stop_size)
+                        price = round(price, Config.roundVal)
+                        logging.warning("Manual Order Custom: Recalculated TP using fallback: entry=%s, custom_stop=%s, stop_size=%s, multiplier=%s, price=%s", 
+                                      entry_stop_price, custom_stop, stop_size, multiplier, price)
+                    else:
+                        logging.error("Manual Order Custom: Cannot calculate fallback TP - custom_stop=%s, entry_stop_price=%s", 
+                                    custom_stop, entry_stop_price)
+                        price = None
+                else:
+                    logging.error("Manual Order: Cannot calculate TP, skipping TP order. barType=%s, stopLoss=%s", 
+                                entryData.get('barType'), entryData.get('stopLoss'))
+                    price = None
+            
+            logging.info("Manual Order Custom: About to send TP - price=%s, barType=%s, stopLoss=%s, orderId=%s", 
+                        price, entryData.get('barType'), entryData.get('stopLoss'), entryData.get('orderId'))
+            if price is not None and price > 0:
+                logging.info("Sending TP Trade EntryData is %s  and Price is %s  and action is BUY",entryData,price)
+                sendTakeProfit(connection, entryData, price, "BUY")
+            else:
+                logging.error("Manual Order: Skipping TP order due to invalid price=%s", price)
 
             # Calculate stop size in advance for RB, LB, LB2, LB3 (RBB uses different logic)
             stpPrice = 0
@@ -2878,8 +3183,32 @@ async def sendTpSlBuy(connection, entryData):
                                 stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
                                 protection_offset = stop_size * 2.0
                                 logging.warning(f"RB/LB/LB2/LB3: Using fallback stop_size={stop_size}")
+                    elif stop_loss_type == Config.stopLoss[1]:  # 'Custom'
+                        # Use Custom stop loss value directly
+                        custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                        if custom_stop == 0:
+                            # Fallback to bar range if custom value missing
+                            try:
+                                stop_size, _, protection_offset = _calculate_stop_limit_offsets(histData)
+                                logging.warning(f"RB/LB/LB2/LB3: Custom stop loss value missing, using bar range stop_size={stop_size}")
+                            except Exception:
+                                stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                                protection_offset = stop_size * 2.0
+                                logging.warning(f"RB/LB/LB2/LB3: Using fallback stop_size={stop_size}")
+                            # Calculate stop loss price using stop size
+                            stpPrice = float(filled_price) + float(stop_size)
+                        else:
+                            # For Custom: stop_size = |entry - custom_stop|, stop_price = custom_stop
+                            stop_size = abs(float(filled_price) - custom_stop)
+                            protection_offset = stop_size * 2.0
+                            # Stop loss price is the custom value directly
+                            stpPrice = round(custom_stop, Config.roundVal)
+                            logging.info(f"RB/LB/LB2/LB3 Custom stop loss (for SHORT): filled_price={filled_price}, custom_stop={custom_stop}, stop_size={stop_size}, stpPrice={stpPrice}")
+                        # Store stop_size in entryData for sendStopLoss to use in extended hours
+                        entryData['calculated_stop_size'] = stop_size
+                        logging.info(f"RB/LB/LB2/LB3 BUY stop loss (for SHORT): filled_price={filled_price}, stop_size={stop_size}, stpPrice={stpPrice}")
                     else:
-                        # Non-ATR stop loss: use bar range
+                        # Non-ATR, Non-Custom stop loss: use bar range
                         try:
                             stop_size, _, protection_offset = _calculate_stop_limit_offsets(histData)
                             logging.info(f"RB/LB/LB2/LB3: Calculated stop_size={stop_size}, protection_offset={protection_offset} for stop loss")
@@ -2887,30 +3216,79 @@ async def sendTpSlBuy(connection, entryData):
                             stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
                             protection_offset = stop_size * 2.0
                             logging.warning(f"RB/LB/LB2/LB3: Using fallback stop_size={stop_size}")
-                    
-                    # Calculate stop loss price using stop size
-                    # For SHORT position (BUY stop loss): stop_loss = entry + stop_size
-                    # In extended hours, this will be used as stop price for STP LMT, with limit = entry + 2 × stop_size
-                    stpPrice = float(filled_price) + float(stop_size)
-                    logging.info(f"RB/LB/LB2/LB3 BUY stop loss (for SHORT): filled_price={filled_price}, stop_size={stop_size}, stpPrice={stpPrice}")
-                    # Store stop_size in entryData for sendStopLoss to use in extended hours
-                    entryData['calculated_stop_size'] = stop_size
+                        
+                        # Calculate stop loss price using stop size
+                        # For SHORT position (BUY stop loss): stop_loss = entry + stop_size
+                        # In extended hours, this will be used as stop price for STP LMT, with limit = entry + 2 × stop_size
+                        stpPrice = float(filled_price) + float(stop_size)
+                        logging.info(f"RB/LB/LB2/LB3 BUY stop loss (for SHORT): filled_price={filled_price}, stop_size={stop_size}, stpPrice={stpPrice}")
+                        # Store stop_size in entryData for sendStopLoss to use in extended hours
+                        entryData['calculated_stop_size'] = stop_size
             else:
+                # Check if this is a manual order (Stop Order or Limit Order) with custom stop loss
+                if entryData['barType'] in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:  # 'Custom'
+                    # Use Custom stop loss value directly
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback to existing logic if custom value missing
+                        stpPrice = get_sl_for_buying(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
+                        logging.warning(f"Manual Order Custom stop loss (for SHORT): Custom stop loss value missing, using fallback calculation")
+                        stpPrice = stpPrice + 0.01
+                    else:
+                        # For Custom: stop_size = |entry - custom_stop|, stop_price = custom_stop
+                        stop_size = abs(float(filled_price) - custom_stop)
+                        # Stop loss price is the custom value directly
+                        stpPrice = round(custom_stop, Config.roundVal)
+                        # Store stop_size in entryData for sendStopLoss to use in extended hours
+                        entryData['calculated_stop_size'] = stop_size
+                        logging.info(f"Manual Order Custom stop loss (for SHORT): filled_price={filled_price}, custom_stop={custom_stop}, stop_size={stop_size}, stpPrice={stpPrice}")
+                    # Custom stop loss logic complete - stpPrice is set, continue to send order
                 # For other strategies (including RBB), use existing logic
-                stpPrice = get_sl_for_buying(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
-                logging.info(f"BUY stop loss (for SHORT): Base price from get_sl_for_buying={stpPrice}, bar high={entryData['histData'].get('high')}, bar low={entryData['histData'].get('low')}")
-                stpPrice = stpPrice + 0.01
-                logging.info(f"BUY stop loss (for SHORT): After +0.01 adjustment={stpPrice}, filled_price={filled_price}")
+                else:
+                    stpPrice = get_sl_for_buying(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
+                    logging.info(f"BUY stop loss (for SHORT): Base price from get_sl_for_buying={stpPrice}, bar high={entryData['histData'].get('high')}, bar low={entryData['histData'].get('low')}")
+                    stpPrice = stpPrice + 0.01
+                    logging.info(f"BUY stop loss (for SHORT): After +0.01 adjustment={stpPrice}, filled_price={filled_price}")
             
-            logging.info("Sending STPLOSS Trade EntryData is %s  and Price is %s and action is BUY and hist Data [ %s ]", entryData, stpPrice,histData)
-            sendStopLoss(connection, entryData, stpPrice, "BUY")
+            # Ensure stpPrice is set before sending SL
+            if stpPrice == 0:
+                logging.warning("Manual Order: SL price is 0, checking if custom stop loss. barType=%s, stopLoss=%s", 
+                               entryData.get('barType'), entryData.get('stopLoss'))
+                # Try to calculate fallback SL for custom stop loss
+                if entryData.get('barType') in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop > 0:
+                        stpPrice = round(custom_stop, Config.roundVal)
+                        stop_size = abs(float(filled_price) - custom_stop)
+                        entryData['calculated_stop_size'] = stop_size
+                        logging.warning("Manual Order Custom: Recalculated SL using fallback: filled_price=%s, custom_stop=%s, stop_size=%s, stpPrice=%s", 
+                                      filled_price, custom_stop, stop_size, stpPrice)
+                    else:
+                        logging.error("Manual Order Custom: Cannot calculate fallback SL - custom_stop=%s, filled_price=%s", 
+                                    custom_stop, filled_price)
+                        stpPrice = None
+                else:
+                    logging.error("Manual Order: Cannot calculate SL, skipping SL order. barType=%s, stopLoss=%s", 
+                                entryData.get('barType'), entryData.get('stopLoss'))
+                    stpPrice = None
+            
+            logging.info("Manual Order Custom: About to send SL - stpPrice=%s, barType=%s, stopLoss=%s, orderId=%s", 
+                        stpPrice, entryData.get('barType'), entryData.get('stopLoss'), entryData.get('orderId'))
+            if stpPrice is not None and stpPrice > 0:
+                logging.info("Sending STPLOSS Trade EntryData is %s  and Price is %s and action is BUY and hist Data [ %s ]", entryData, stpPrice,histData)
+                sendStopLoss(connection, entryData, stpPrice, "BUY")
+            else:
+                logging.error("Manual Order: Skipping SL order due to invalid price=%s", stpPrice)
+            
             mocPrice = 0
             logging.info("Sending Moc Order  of %s price ",mocPrice)
             sendMoc(connection,entryData,mocPrice,"BUY")
             break
     except Exception as e:
         logging.error("error in take profit and sl buy trade %s",e)
+        logging.error("Traceback: %s", traceback.format_exc())
         print(e)
+        traceback.print_exc()
 
 
 def sendMoc(connection, entryData,price,action):
@@ -3025,45 +3403,92 @@ def sendStopLoss(connection, entryData,price,action):
                     logging.info(f"Extended hours stop-limit calculation: action={action}, bar high={hist_data.get('high')}, bar low={hist_data.get('low')}, stop_size={stop_size}, protection_offset={protection_offset}, limit_offset={limit_offset}")
             
             if is_manual_stop_order:
-                # Manual Stop Order in extended hours: 
-                # Stop = entry ± stop_size (same as RB)
-                # Limit = entry ± 2 × stop_size (same as RB)
-                # Use stop_size from entryData if stored, otherwise recalculate
-                manual_stop_size = entryData.get('stopSize')
-                if manual_stop_size is None or manual_stop_size <= 0:
-                    # Recalculate stop_size the same way as in manual_stop_order
-                    stop_loss_type = entryData.get('stopLoss')
-                    if stop_loss_type in Config.atrStopLossMap:
-                        manual_stop_size = _get_atr_stop_offset(connection, entryData['contract'], stop_loss_type)
-                        if manual_stop_size is None:
-                            manual_stop_size = stop_size  # Fallback to bar-based
+                # Manual Stop Order in extended hours - MUST use STP LMT (Stop-Limit Order)
+                logging.info(f"Manual Stop Order detected in extended hours: barType={bar_type}, stopLoss={entryData.get('stopLoss')}, action={action}")
+                stop_loss_type = entryData.get('stopLoss')
+                
+                # Check if this is Custom stop loss
+                if stop_loss_type == Config.stopLoss[1]:  # 'Custom'
+                    # For Custom stop loss: stop_price = custom_stop, limit = custom_stop ± 2 × stop_size
+                    # Use stop_size from entryData (stored as calculated_stop_size)
+                    manual_stop_size = entryData.get('calculated_stop_size')
+                    if manual_stop_size is None or manual_stop_size <= 0:
+                        # Recalculate stop_size from custom_stop and filled_price
+                        custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                        if custom_stop == 0:
+                            # Fallback to bar-based if custom value missing
+                            manual_stop_size = stop_size
+                            logging.warning(f"Manual Stop Order Custom OTH: Custom stop loss value missing, using bar-based stop_size={manual_stop_size}")
+                        else:
+                            manual_stop_size = abs(float(filled_price) - custom_stop)
+                            logging.info(f"Manual Stop Order Custom OTH: Recalculated stop_size={manual_stop_size} from filled_price={filled_price} and custom_stop={custom_stop}")
                     else:
-                        # For non-ATR, try to calculate from entry and stop loss price
-                        # Use bar-based calculation as approximation
-                        manual_stop_size = stop_size
-                    logging.info(f"Manual Stop Order OTH: Recalculated stop_size={manual_stop_size} (was not stored)")
+                        logging.info(f"Manual Stop Order Custom OTH: Using stored stop_size={manual_stop_size}")
+                    
+                    # Stop loss price is the custom value directly
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback: use filled_price ± stop_size
+                        if action.upper() == "SELL":
+                            stop_loss_price = filled_price - manual_stop_size
+                        else:
+                            stop_loss_price = filled_price + manual_stop_size
+                        logging.warning(f"Manual Stop Order Custom OTH: Custom stop loss value missing, using calculated stop_loss_price={stop_loss_price}")
+                    else:
+                        stop_loss_price = round(custom_stop, Config.roundVal)
+                    
+                    # Limit offset = 2 × stop_size (same as entry order uses)
+                    limit_offset = round(manual_stop_size * 2.0, Config.roundVal)
+                    
+                    if action.upper() == "SELL":
+                        # SELL stop loss means LONG position, so limit is below stop
+                        limit_price = stop_loss_price - limit_offset
+                        logging.info(f"Manual Stop Order Custom OTH: SELL stop loss (LONG position): entry={filled_price}, stop={stop_loss_price} (custom_stop), limit={limit_price} (stop - {limit_offset}), stop_size={manual_stop_size}")
+                    else:
+                        # BUY stop loss means SHORT position, so limit is above stop
+                        limit_price = stop_loss_price + limit_offset
+                        logging.info(f"Manual Stop Order Custom OTH: BUY stop loss (SHORT position): entry={filled_price}, stop={stop_loss_price} (custom_stop), limit={limit_price} (stop + {limit_offset}), stop_size={manual_stop_size}")
+                    
+                    # Update adjusted_price to use custom stop loss price
+                    adjusted_price = round(stop_loss_price, Config.roundVal)
+                    order_kwargs['auxPrice'] = adjusted_price
                 else:
-                    logging.info(f"Manual Stop Order OTH: Using stored stop_size={manual_stop_size}")
-                
-                # For Stop Order in extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
-                protection_offset = round(manual_stop_size * 1.0, Config.roundVal)  # 1x for stop price
-                limit_offset = round(manual_stop_size * 2.0, Config.roundVal)  # 2x for limit price
-                logging.info(f"Manual Stop Order OTH: stop_size={manual_stop_size}, protection_offset={protection_offset} (for stop), limit_offset={limit_offset} (for limit)")
-                
-                if action.upper() == "SELL":
-                    # SELL stop loss means LONG position, so stop loss is below entry
-                    stop_loss_price = filled_price - protection_offset  # entry - stop_size
-                    limit_price = filled_price - limit_offset  # entry - 2 × stop_size
-                    logging.info(f"Manual Stop Order OTH: SELL stop loss (LONG position): entry={filled_price}, stop={stop_loss_price} (entry - {protection_offset}), limit={limit_price} (entry - {limit_offset})")
-                else:
-                    # BUY stop loss means SHORT position, so stop loss is above entry
-                    stop_loss_price = filled_price + protection_offset  # entry + stop_size
-                    limit_price = filled_price + limit_offset  # entry + 2 × stop_size
-                    logging.info(f"Manual Stop Order OTH: BUY stop loss (SHORT position): entry={filled_price}, stop={stop_loss_price} (entry + {protection_offset}), limit={limit_price} (entry + {limit_offset})")
-                
-                # Update adjusted_price to use calculated stop loss price
-                adjusted_price = round(stop_loss_price, Config.roundVal)
-                order_kwargs['auxPrice'] = adjusted_price
+                    # Non-Custom stop loss: Stop = entry ± stop_size, Limit = entry ± 2 × stop_size
+                    # Use stop_size from entryData if stored, otherwise recalculate
+                    manual_stop_size = entryData.get('stopSize')
+                    if manual_stop_size is None or manual_stop_size <= 0:
+                        # Recalculate stop_size the same way as in manual_stop_order
+                        if stop_loss_type in Config.atrStopLossMap:
+                            manual_stop_size = _get_atr_stop_offset(connection, entryData['contract'], stop_loss_type)
+                            if manual_stop_size is None:
+                                manual_stop_size = stop_size  # Fallback to bar-based
+                        else:
+                            # For non-ATR, try to calculate from entry and stop loss price
+                            # Use bar-based calculation as approximation
+                            manual_stop_size = stop_size
+                        logging.info(f"Manual Stop Order OTH: Recalculated stop_size={manual_stop_size} (was not stored)")
+                    else:
+                        logging.info(f"Manual Stop Order OTH: Using stored stop_size={manual_stop_size}")
+                    
+                    # For Stop Order in extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
+                    protection_offset = round(manual_stop_size * 1.0, Config.roundVal)  # 1x for stop price
+                    limit_offset = round(manual_stop_size * 2.0, Config.roundVal)  # 2x for limit price
+                    logging.info(f"Manual Stop Order OTH: stop_size={manual_stop_size}, protection_offset={protection_offset} (for stop), limit_offset={limit_offset} (for limit)")
+                    
+                    if action.upper() == "SELL":
+                        # SELL stop loss means LONG position, so stop loss is below entry
+                        stop_loss_price = filled_price - protection_offset  # entry - stop_size
+                        limit_price = filled_price - limit_offset  # entry - 2 × stop_size
+                        logging.info(f"Manual Stop Order OTH: SELL stop loss (LONG position): entry={filled_price}, stop={stop_loss_price} (entry - {protection_offset}), limit={limit_price} (entry - {limit_offset})")
+                    else:
+                        # BUY stop loss means SHORT position, so stop loss is above entry
+                        stop_loss_price = filled_price + protection_offset  # entry + stop_size
+                        limit_price = filled_price + limit_offset  # entry + 2 × stop_size
+                        logging.info(f"Manual Stop Order OTH: BUY stop loss (SHORT position): entry={filled_price}, stop={stop_loss_price} (entry + {protection_offset}), limit={limit_price} (entry + {limit_offset})")
+                    
+                    # Update adjusted_price to use calculated stop loss price
+                    adjusted_price = round(stop_loss_price, Config.roundVal)
+                    order_kwargs['auxPrice'] = adjusted_price
             else:
                 # Regular trade types (including RB/LB/LB2/LB3): use existing logic
                 # Check if this is RB/LB/LB2/LB3 - need to use entry_price for limit calculation
@@ -3083,19 +3508,74 @@ def sendStopLoss(connection, entryData,price,action):
                         limit_price = filled_price - limit_offset
                         logging.info(f"RB/LB/LB2/LB3 SELL stop loss (LONG): stop={adjusted_price} (entry - stop_size), limit={limit_price} (entry - 2×stop_size={limit_offset}), entry={filled_price}")
                 else:
-                    # Check if this is Limit Order with stored stop_size
-                    limit_order_stop_size = entryData.get('stopSize')
-                    if limit_order_stop_size is not None and limit_order_stop_size > 0 and bar_type == 'Limit Order':
-                        # Limit Order in extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
-                        limit_offset = limit_order_stop_size * 2.0
-                        if action.upper() == "BUY":
-                            # SHORT position: stop = entry + stop_size, limit = entry + 2 × stop_size
-                            limit_price = filled_price + limit_offset
-                            logging.info(f"Limit Order BUY stop loss (SHORT): stop={adjusted_price} (entry + stop_size), limit={limit_price} (entry + 2×stop_size={limit_offset}), entry={filled_price}")
+                    # Check if this is Limit Order
+                    if bar_type == 'Limit Order':
+                        stop_loss_type = entryData.get('stopLoss')
+                        limit_order_stop_size = entryData.get('stopSize')
+                        
+                        # Check if this is Custom stop loss
+                        if stop_loss_type == Config.stopLoss[1]:  # 'Custom'
+                            # For Custom stop loss: stop_price = custom_stop, limit = custom_stop ± 2 × stop_size
+                            custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                            if custom_stop == 0:
+                                # Fallback: use filled_price ± stop_size
+                                if limit_order_stop_size is not None and limit_order_stop_size > 0:
+                                    if action.upper() == "SELL":
+                                        stop_loss_price = filled_price - limit_order_stop_size
+                                    else:
+                                        stop_loss_price = filled_price + limit_order_stop_size
+                                    limit_offset = limit_order_stop_size * 2.0
+                                    limit_price = stop_loss_price - limit_offset if action.upper() == "SELL" else stop_loss_price + limit_offset
+                                    logging.warning(f"Limit Order Custom OTH: Custom stop loss value missing, using calculated stop_loss_price={stop_loss_price}")
+                                else:
+                                    # Use bar-based calculation as fallback
+                                    stop_loss_price = adjusted_price
+                                    limit_offset = stop_size * 2.0
+                                    limit_price = adjusted_price - limit_offset if action.upper() == "SELL" else adjusted_price + limit_offset
+                            else:
+                                # Stop loss price is the custom value directly
+                                stop_loss_price = round(custom_stop, Config.roundVal)
+                                
+                                # Use stored stop_size or recalculate
+                                if limit_order_stop_size is not None and limit_order_stop_size > 0:
+                                    manual_stop_size = limit_order_stop_size
+                                else:
+                                    # Recalculate stop_size from custom_stop and filled_price
+                                    manual_stop_size = abs(float(filled_price) - custom_stop)
+                                    logging.info(f"Limit Order Custom OTH: Recalculated stop_size={manual_stop_size} from filled_price={filled_price} and custom_stop={custom_stop}")
+                                
+                                # Limit offset = 2 × stop_size
+                                limit_offset = round(manual_stop_size * 2.0, Config.roundVal)
+                                
+                                if action.upper() == "SELL":
+                                    # SELL stop loss means LONG position, so limit is below stop
+                                    limit_price = stop_loss_price - limit_offset
+                                    logging.info(f"Limit Order Custom OTH: SELL stop loss (LONG position): entry={filled_price}, stop={stop_loss_price} (custom_stop), limit={limit_price} (stop - {limit_offset}), stop_size={manual_stop_size}")
+                                else:
+                                    # BUY stop loss means SHORT position, so limit is above stop
+                                    limit_price = stop_loss_price + limit_offset
+                                    logging.info(f"Limit Order Custom OTH: BUY stop loss (SHORT position): entry={filled_price}, stop={stop_loss_price} (custom_stop), limit={limit_price} (stop + {limit_offset}), stop_size={manual_stop_size}")
+                                
+                                # Update adjusted_price to use custom stop loss price
+                                adjusted_price = round(stop_loss_price, Config.roundVal)
+                                order_kwargs['auxPrice'] = adjusted_price
                         else:
-                            # LONG position: stop = entry - stop_size, limit = entry - 2 × stop_size
-                            limit_price = filled_price - limit_offset
-                            logging.info(f"Limit Order SELL stop loss (LONG): stop={adjusted_price} (entry - stop_size), limit={limit_price} (entry - 2×stop_size={limit_offset}), entry={filled_price}")
+                            # Limit Order with non-Custom stop loss: use original logic (unchanged)
+                            # Check if stored stop_size exists (for ATR or other types that store it)
+                            if limit_order_stop_size is not None and limit_order_stop_size > 0:
+                                # Limit Order in extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
+                                limit_offset = limit_order_stop_size * 2.0
+                                if action.upper() == "BUY":
+                                    # SHORT position: stop = entry + stop_size, limit = entry + 2 × stop_size
+                                    limit_price = filled_price + limit_offset
+                                    logging.info(f"Limit Order BUY stop loss (SHORT): stop={adjusted_price} (entry + stop_size), limit={limit_price} (entry + 2×stop_size={limit_offset}), entry={filled_price}")
+                                else:
+                                    # LONG position: stop = entry - stop_size, limit = entry - 2 × stop_size
+                                    limit_price = filled_price - limit_offset
+                                    logging.info(f"Limit Order SELL stop loss (LONG): stop={adjusted_price} (entry - stop_size), limit={limit_price} (entry - 2×stop_size={limit_offset}), entry={filled_price}")
+                            else:
+                                # Limit Order without stored stop_size: fall through to original logic below
+                                pass
                     else:
                         # Other trade types: use adjusted_price ± protection_offset
                         if action.upper() == "BUY":
@@ -3105,12 +3585,13 @@ def sendStopLoss(connection, entryData,price,action):
                             limit_price = adjusted_price - protection_offset
                             logging.info(f"SELL stop loss (LONG position): stop={adjusted_price}, limit={limit_price} (stop - {protection_offset})")
 
+            # For extended hours, ALWAYS use STP LMT (Stop-Limit Order) for stop loss
             order_type = "STP LMT"
             order_kwargs['orderType'] = "STP LMT"
             order_kwargs['lmtPrice'] = round(limit_price, Config.roundVal)
             logging.info(
-                "Extended hours protection stop-limit: action=%s stop=%s limit=%s stop_size=%s protection_offset=%s session=%s",
-                action, adjusted_price, order_kwargs['lmtPrice'], stop_size, protection_offset, session
+                "Extended hours protection stop-limit: action=%s stop=%s limit=%s stop_size=%s protection_offset=%s session=%s barType=%s",
+                action, adjusted_price, order_kwargs['lmtPrice'], stop_size, protection_offset, session, entryData.get('barType', '')
             )
         elif is_extended:
             # Extended hours but hist_data not available - use fallback calculation
@@ -3160,10 +3641,10 @@ def sendStopLoss(connection, entryData,price,action):
 
 def sendTakeProfit(connection, entryData,price,action):
     try:
-        # if action == "BUY":
-        #     price = price - 1
-        # else:
-        #     price = price + 1
+        # Take Profit is ALWAYS a LIMIT order (LMT), regardless of session (regular or extended hours)
+        is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
+        logging.info(f"Sending Take Profit: barType={entryData.get('barType', '')}, action={action}, price={price}, session={session}, is_extended={is_extended}")
+        
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
                                             order=Order(orderType="LMT", action=action,
                                                         totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1)  ,outsideRth = entryData['outsideRth'] )
@@ -3280,13 +3761,39 @@ def updateTakeProfit(connection, entryData,price,action,orderId):
 
 async def sendTpSlSell(connection, entryData):
     try:
+        logging.info("sendTpSlSell called for barType=%s, stopLoss=%s, orderId=%s", 
+                     entryData.get('barType'), entryData.get('stopLoss'), entryData.get('orderId'))
         #  if entry buy
         max_retries = 5  # Limit retries to avoid infinite loop
         retry_count = 0
         while True:
             histData = None
-            if entryData['barType'] == Config.entryTradeType[0] or entryData['barType'] == Config.entryTradeType[1] or entryData['barType'] == Config.entryTradeType[2] or entryData['barType'] == Config.entryTradeType[6] or entryData['barType'] == Config.entryTradeType[7] or entryData['barType'] == Config.entryTradeType[8]:
+            # Check if this is a manual order (Stop Order or Limit Order)
+            is_manual_order = entryData.get('barType', '') in Config.manualOrderTypes
+            
+            if entryData['barType'] == Config.entryTradeType[0] or entryData['barType'] == Config.entryTradeType[1] or entryData['barType'] == Config.entryTradeType[2] or entryData['barType'] == Config.entryTradeType[3] or entryData['barType'] == Config.entryTradeType[4] or entryData['barType'] == Config.entryTradeType[6] or entryData['barType'] == Config.entryTradeType[7] or entryData['barType'] == Config.entryTradeType[8]:
                 histData = entryData['histData']
+            elif is_manual_order:
+                # For manual orders, try to use stored histData first, otherwise create fallback immediately
+                histData = entryData.get('histData')
+                if not histData or not isinstance(histData, dict) or 'high' not in histData:
+                    # Create fallback histData from filled price immediately (no retries needed)
+                    filled_price = Config.orderFilledPrice.get(entryData['orderId'])
+                    if filled_price is None:
+                        filled_price = entryData.get('lastPrice', 0)
+                    if filled_price > 0:
+                        # Create a minimal histData with 1% range around filled price
+                        histData = {
+                            'high': filled_price * 1.005,
+                            'low': filled_price * 0.995,
+                            'close': filled_price
+                        }
+                        logging.info("Manual Order: Using fallback histData from filled price: %s", histData)
+                    else:
+                        logging.error("Manual Order: Cannot create fallback histData: filled_price is invalid")
+                        # Don't break - continue with None histData, the custom stop loss logic doesn't need it
+                else:
+                    logging.info("Manual Order: Using stored histData: %s", histData)
             else:
                 chartTime = getRecentChartTime(entryData['timeFrame'])
                 histData = connection.getHistoricalChartData(entryData['contract'], entryData['timeFrame'], chartTime)
@@ -3316,12 +3823,41 @@ async def sendTpSlSell(connection, entryData):
                 # histData = entryData['histData']
             price = 0
             filled_price = Config.orderFilledPrice.get(entryData['orderId'])
+            if filled_price is None:
+                filled_price = entryData.get('lastPrice', 0)
+            if filled_price is None or filled_price == 0:
+                # Also check entryData for avgFillPrice or fillPrice
+                filled_price = entryData.get('avgFillPrice', 0)
+                if filled_price == 0:
+                    filled_price = entryData.get('fillPrice', 0)
+            if filled_price == 0 or filled_price is None:
+                logging.warning("Manual Order: filled_price is 0 or None, waiting for fill price. OrderId=%s, retry=%s/%s, orderFilledPrice keys=%s", 
+                             entryData.get('orderId'), retry_count, max_retries, list(Config.orderFilledPrice.keys()))
+                if retry_count >= max_retries:
+                    logging.error("Manual Order: Max retries reached, cannot proceed without filled_price. Using entry_stop_price as fallback.")
+                    # Use entry_stop_price as fallback for custom stop loss
+                    if entryData.get('barType') in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:
+                        filled_price = entryData.get('lastPrice', entryData.get('entryPrice', 0))
+                        logging.warning("Manual Order Custom: Using entry_stop_price=%s as filled_price fallback", filled_price)
+                        if filled_price == 0:
+                            logging.error("Manual Order Custom: Cannot proceed - no valid price available")
+                            break
+                    else:
+                        logging.error("Manual Order: Cannot proceed without filled_price and no fallback available")
+                        break
+                else:
+                    retry_count += 1
+                    await asyncio.sleep(0.5)
+                    continue
+            
             # Use entry stop price (lastPrice) instead of filled price for take profit calculation
             entry_stop_price = entryData.get('lastPrice', filled_price)
-            if entry_stop_price is None:
+            if entry_stop_price is None or entry_stop_price == 0:
                 entry_stop_price = filled_price
-            logging.info("In TPSL %s contract  and for %s histdata. Entry stop price=%s, Filled price=%s",
-                         entryData['contract'], histData, entry_stop_price, filled_price)
+            logging.info("In TPSL %s contract  and for %s histdata. Entry stop price=%s, Filled price=%s, barType=%s, stopLoss=%s",
+                         entryData['contract'], histData, entry_stop_price, filled_price, entryData.get('barType'), entryData.get('stopLoss'))
+            
+            # Skip RB/RBB section for manual orders - they have their own logic
             if (entryData['barType'] == Config.entryTradeType[3]) or (entryData['barType'] == Config.entryTradeType[4]) or (entryData['barType'] == Config.entryTradeType[5]):
                 candleData = connection.getDailyCandle(entryData['contract'])
                 if (candleData == None or len(candleData) < 1):
@@ -3329,10 +3865,45 @@ async def sendTpSlSell(connection, entryData):
                     await  asyncio.sleep(1)
                     continue
                 logging.info(" Candle Data for takeProfit %s and contract is %s", candleData[-1],entryData['contract'])
-                try:
-                    stop_size, _, _ = _calculate_stop_limit_offsets(histData)
-                except Exception:
-                    stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                
+                # Check if stop loss is ATR-based or Custom - use same stop_size as entry and stop loss
+                stop_loss_type = entryData.get('stopLoss')
+                if stop_loss_type in Config.atrStopLossMap:
+                    # Use ATR stop_size for take profit (same as entry and stop loss)
+                    atr_offset = _get_atr_stop_offset(connection, entryData['contract'], stop_loss_type)
+                    if atr_offset is not None and atr_offset > 0:
+                        stop_size = atr_offset
+                        logging.info(f"RB/RBB ATR TP (LONG): Using ATR stop_size={stop_size} for take profit")
+                    else:
+                        # Fallback to bar-based if ATR unavailable
+                        try:
+                            stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                            logging.warning(f"RB/RBB: ATR unavailable, using bar-based stop_size={stop_size} for TP")
+                        except Exception:
+                            stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                            logging.warning(f"RB/RBB: Using fallback bar-based stop_size={stop_size} for TP")
+                elif stop_loss_type == Config.stopLoss[1]:  # 'Custom'
+                    # Use Custom stop_size for take profit (same as entry and stop loss)
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback to bar-based if custom value missing
+                        try:
+                            stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                            logging.warning(f"RB/RBB: Custom stop loss value missing, using bar-based stop_size={stop_size} for TP")
+                        except Exception:
+                            stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                            logging.warning(f"RB/RBB: Using fallback bar-based stop_size={stop_size} for TP")
+                    else:
+                        # stop_size = |entry - custom_stop|
+                        stop_size = abs(float(entry_stop_price) - custom_stop)
+                        logging.info(f"RB/RBB Custom TP (LONG): entry={entry_stop_price}, custom_stop={custom_stop}, stop_size={stop_size} for take profit")
+                else:
+                    # Non-ATR, Non-Custom stop loss: use bar-based stop_size (same as entry and stop loss)
+                    try:
+                        stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                    except Exception:
+                        stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                    logging.info(f"RB/RBB bar-based TP (LONG): Using bar-based stop_size={stop_size} for take profit")
 
                 multiplier_map = {
                     Config.takeProfit[0]: 1,
@@ -3356,8 +3927,32 @@ async def sendTpSlSell(connection, entryData):
                     entryData['contract'], stop_size, multiplier, entry_stop_price, filled_price, price,
                 )
             else:
+                # Check if this is a manual order (Stop Order or Limit Order) with custom stop loss
+                if entryData['barType'] in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:  # 'Custom'
+                    # Use Custom stop_size for take profit (same as entry and stop loss)
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback to regular calculation if custom value missing
+                        price = get_tp_for_selling(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
+                        logging.warning(f"Manual Order Custom TP (LONG): Custom stop loss value missing, using fallback calculation")
+                    else:
+                        # stop_size = |entry - custom_stop|
+                        stop_size = abs(float(entry_stop_price) - custom_stop)
+                        multiplier_map = {
+                            Config.takeProfit[0]: 1,    # 1:1
+                            Config.takeProfit[1]: 1.5,  # 1.5:1
+                            Config.takeProfit[2]: 2,    # 2:1
+                            Config.takeProfit[3]: 2.5,  # 2.5:1
+                        }
+                        if len(Config.takeProfit) > 4:
+                            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
+                        multiplier = multiplier_map.get(entryData['profit'], 1)
+                        # For LONG position (SELL TP): TP = entry + (multiplier × stop_size)
+                        price = float(entry_stop_price) + (multiplier * stop_size)
+                        price = round(price, Config.roundVal)
+                        logging.info(f"Manual Order Custom TP (LONG): entry={entry_stop_price}, custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
                 # Check if this is a Limit Order with ATR stop loss - use same ATR stop_size for TP
-                if entryData['barType'] == Config.entryTradeType[0] and entryData.get('stopLoss') in Config.atrStopLossMap:
+                elif entryData['barType'] == Config.entryTradeType[0] and entryData.get('stopLoss') in Config.atrStopLossMap:
                     # Use ATR stop_size for take profit calculation (same as entry and stop loss)
                     atr_offset = _get_atr_stop_offset(connection, entryData['contract'], entryData['stopLoss'])
                     if atr_offset is not None and atr_offset > 0:
@@ -3421,8 +4016,32 @@ async def sendTpSlSell(connection, entryData):
                                 stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
                                 protection_offset = stop_size * 2.0
                                 logging.warning(f"RB/LB/LB2/LB3: Using fallback stop_size={stop_size}")
+                    elif stop_loss_type == Config.stopLoss[1]:  # 'Custom'
+                        # Use Custom stop loss value directly
+                        custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                        if custom_stop == 0:
+                            # Fallback to bar range if custom value missing
+                            try:
+                                stop_size, _, protection_offset = _calculate_stop_limit_offsets(histData)
+                                logging.warning(f"RB/LB/LB2/LB3: Custom stop loss value missing, using bar range stop_size={stop_size}")
+                            except Exception:
+                                stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
+                                protection_offset = stop_size * 2.0
+                                logging.warning(f"RB/LB/LB2/LB3: Using fallback stop_size={stop_size}")
+                            # Calculate stop loss price using stop size
+                            stpPrice = float(filled_price) - float(stop_size)
+                        else:
+                            # For Custom: stop_size = |entry - custom_stop|, stop_price = custom_stop
+                            stop_size = abs(float(filled_price) - custom_stop)
+                            protection_offset = stop_size * 2.0
+                            # Stop loss price is the custom value directly
+                            stpPrice = round(custom_stop, Config.roundVal)
+                            logging.info(f"RB/LB/LB2/LB3 Custom stop loss (for LONG): filled_price={filled_price}, custom_stop={custom_stop}, stop_size={stop_size}, stpPrice={stpPrice}")
+                        # Store stop_size in entryData for sendStopLoss to use in extended hours
+                        entryData['calculated_stop_size'] = stop_size
+                        logging.info(f"RB/LB/LB2/LB3 SELL stop loss (for LONG): filled_price={filled_price}, stop_size={stop_size}, stpPrice={stpPrice}")
                     else:
-                        # Non-ATR stop loss: use bar range
+                        # Non-ATR, Non-Custom stop loss: use bar range
                         try:
                             stop_size, _, protection_offset = _calculate_stop_limit_offsets(histData)
                             logging.info(f"RB/LB/LB2/LB3: Calculated stop_size={stop_size}, protection_offset={protection_offset} for stop loss")
@@ -3430,20 +4049,38 @@ async def sendTpSlSell(connection, entryData):
                             stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
                             protection_offset = stop_size * 2.0
                             logging.warning(f"RB/LB/LB2/LB3: Using fallback stop_size={stop_size}")
-                    
-                    # Calculate stop loss price using stop size
-                    # For LONG position (SELL stop loss): stop_loss = entry - stop_size
-                    # In extended hours, this will be used as stop price for STP LMT, with limit = entry - 2 × stop_size
-                    stpPrice = float(filled_price) - float(stop_size)
-                    logging.info(f"RB/LB/LB2/LB3 SELL stop loss (for LONG): filled_price={filled_price}, stop_size={stop_size}, stpPrice={stpPrice}")
-                    # Store stop_size in entryData for sendStopLoss to use in extended hours
-                    entryData['calculated_stop_size'] = stop_size
+                        
+                        # Calculate stop loss price using stop size
+                        # For LONG position (SELL stop loss): stop_loss = entry - stop_size
+                        # In extended hours, this will be used as stop price for STP LMT, with limit = entry - 2 × stop_size
+                        stpPrice = float(filled_price) - float(stop_size)
+                        logging.info(f"RB/LB/LB2/LB3 SELL stop loss (for LONG): filled_price={filled_price}, stop_size={stop_size}, stpPrice={stpPrice}")
+                        # Store stop_size in entryData for sendStopLoss to use in extended hours
+                        entryData['calculated_stop_size'] = stop_size
             else:
+                # Check if this is a manual order (Stop Order or Limit Order) with custom stop loss
+                if entryData['barType'] in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:  # 'Custom'
+                    # Use Custom stop loss value directly
+                    custom_stop = _to_float(entryData.get('slValue', 0), 0)
+                    if custom_stop == 0:
+                        # Fallback to existing logic if custom value missing
+                        stpPrice = get_sl_for_selling(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
+                        logging.warning(f"Manual Order Custom stop loss (for LONG): Custom stop loss value missing, using fallback calculation")
+                        stpPrice = stpPrice - 0.01
+                    else:
+                        # For Custom: stop_size = |entry - custom_stop|, stop_price = custom_stop
+                        stop_size = abs(float(filled_price) - custom_stop)
+                        # Stop loss price is the custom value directly
+                        stpPrice = round(custom_stop, Config.roundVal)
+                        # Store stop_size in entryData for sendStopLoss to use in extended hours
+                        entryData['calculated_stop_size'] = stop_size
+                        logging.info(f"Manual Order Custom stop loss (for LONG): filled_price={filled_price}, custom_stop={custom_stop}, stop_size={stop_size}, stpPrice={stpPrice}")
                 # For other strategies (including RBB), use existing logic
-                stpPrice = get_sl_for_selling(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
-                logging.info(f"minus 0.01 in stop entry is buying {stpPrice}")
-                stpPrice = stpPrice - 0.01
-                logging.info(f"SELL stop loss (for LONG): After -0.01 adjustment={stpPrice}, filled_price={filled_price}")
+                else:
+                    stpPrice = get_sl_for_selling(connection, entryData['stopLoss'], filled_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
+                    logging.info(f"minus 0.01 in stop entry is buying {stpPrice}")
+                    stpPrice = stpPrice - 0.01
+                    logging.info(f"SELL stop loss (for LONG): After -0.01 adjustment={stpPrice}, filled_price={filled_price}")
             
             logging.info("Sending STPLOSS Trade EntryData is %s  and Price is %s  and hist Data [ %s ] and action is Sell", entryData, stpPrice,histData)
 

@@ -29,12 +29,43 @@ class connection:
             # because they already send bracket orders. Extended hours manual orders need sendTpAndSl.
             is_manual_order = data.get('barType', '') in Config.manualOrderTypes
             is_extended_hours = data.get('outsideRth', False)
-            should_send_tp_sl = (
-                data['barType'] != Config.entryTradeType[0] and
-                not (is_manual_order and not is_extended_hours)  # Skip manual orders in regular hours
-            )
+            ord_type = data.get('ordType', '')
+            bar_type = data.get('barType', '')
+            
+            # Detailed logging for debugging
+            logging.info("orderStatusEvent: orderId=%s, status=%s, barType=%s, ordType=%s, outsideRth=%s, is_manual_order=%s, is_extended_hours=%s",
+                        trade.order.orderId, trade.orderStatus.status, bar_type, ord_type, is_extended_hours, is_manual_order, is_extended_hours)
+            
+            # Logic: Send TP/SL if:
+            # 1. It's a manual order in extended hours (they need TP/SL after fill, not bracket orders)
+            # 2. OR it's not a manual order (other trade types always need TP/SL)
+            # 3. AND it's not FB (entryTradeType[0]) - but wait, entryTradeType[0] is actually "Stop Order" now
+            # Actually, the original logic was checking if barType != entryTradeType[0] to exclude FB
+            # But since entryTradeType now starts with manualOrderTypes, we need different logic
+            
+            # For manual orders: send TP/SL only in extended hours (not in regular hours where bracket orders are used)
+            # For other trade types: send TP/SL (except FB which is handled differently)
+            if is_manual_order:
+                # Manual orders: only send TP/SL in extended hours
+                should_send_tp_sl = is_extended_hours
+            else:
+                # Other trade types: send TP/SL (except FB which is entryTradeType[len(manualOrderTypes)])
+                # Since entryTradeType = manualOrderTypes + ['FB', ...], FB is at index len(manualOrderTypes)
+                fb_index = len(Config.manualOrderTypes)
+                should_send_tp_sl = data['barType'] != Config.entryTradeType[fb_index]
+            
+            logging.info("orderStatusEvent: should_send_tp_sl=%s (barType != entryTradeType[0]: %s, not (is_manual_order and not is_extended_hours): %s)",
+                        should_send_tp_sl, 
+                        data['barType'] != Config.entryTradeType[0],
+                        not (is_manual_order and not is_extended_hours))
+            
             if should_send_tp_sl:
+                logging.info("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s",
+                            trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
                 sendTpAndSl(self, data)
+            else:
+                logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
+                            trade.order.orderId, bar_type, ord_type)
 
     # tws connection stablish
     def connect(self):
