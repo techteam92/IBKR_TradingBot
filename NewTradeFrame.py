@@ -20,6 +20,8 @@ atr=[]
 quantity=[]
 cancelButton = []
 row_async_tasks = []
+replayEnabled = []  # Track replay state for each row
+replayButtonList = []  # Track replay buttons for each row
 
 rowPosition=0
 buttonRely=0.3
@@ -96,6 +98,207 @@ def _show_entry_price_modal(trade_type_combo, entry_points_entry, order_type_nam
     # Bind Enter key to save
     entry_widget.bind("<Return>", lambda e: save_value())
     entry_widget.bind("<Escape>", lambda e: cancel_dialog())
+    
+    # Wait for modal to close
+    modal.wait_window()
+
+def _show_conditional_order_modal(trade_type_combo, entry_points_entry, order_type_name):
+    """
+    Show a modal dialog to enter conditional order parameters.
+    Has two columns: Conditional Order1 and Conditional Order2.
+    """
+    # Get parent window from the combobox
+    parent = trade_type_combo.winfo_toplevel()
+    
+    # Create modal dialog
+    modal = tkinter.Toplevel(parent)
+    modal.title(f"{order_type_name} - Conditional Order Setup")
+    modal.geometry("800x500")
+    modal.resizable(False, False)
+    modal.transient(parent)  # Make it modal relative to parent
+    modal.grab_set()  # Make it modal
+    
+    # Center the dialog
+    modal.update_idletasks()
+    x = (modal.winfo_screenwidth() // 2) - (800 // 2)
+    y = (modal.winfo_screenheight() // 2) - (500 // 2)
+    modal.geometry(f"800x500+{x}+{y}")
+    
+    # Store previous selection index
+    previous_index = 0  # Default to first option
+    if hasattr(trade_type_combo, '_previous_index'):
+        previous_index = trade_type_combo._previous_index
+    
+    # Get current value if any (comma-separated: selected_order,co1_stop,co1_condition,co1_price,co2_stop,co2_cond1,co2_price1,co2_cond2,co2_price2)
+    current_value = entry_points_entry.get() if entry_points_entry.get() else "0,0,Above,0,0,Above,0,Above,0"
+    values = current_value.split(",")
+    if len(values) < 9:
+        values = ["0", "0", "Above", "0", "0", "Above", "0", "Above", "0"]
+    
+    # Parse values: [0]=selected_order, [1]=co1_stop, [2]=co1_condition, [3]=co1_price, [4]=co2_stop, [5]=co2_cond1, [6]=co2_price1, [7]=co2_cond2, [8]=co2_price2
+    selected_order = values[0] if len(values) > 0 else "0"
+    co1_values = values[1:4] if len(values) > 3 else ["0", "Above", "0"]
+    co2_values = values[4:9] if len(values) > 8 else ["0", "Above", "0", "Above", "0"]
+    
+    # Main container frame - split in half
+    main_frame = Frame(modal)
+    main_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+    
+    # Shared variables for mutually exclusive checkboxes (use IntVar for proper check mark display)
+    co1_selected = IntVar(modal, value=1 if selected_order == "1" else 0)
+    co2_selected = IntVar(modal, value=1 if selected_order == "2" else 0)
+    
+    # Rectangle 1: Conditional Order1 (Left Half)
+    co1_rect = Frame(main_frame, relief=RAISED, borderwidth=2, bg='#F0F0F0')
+    co1_rect.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 5))
+    
+    # Title for Rectangle 1
+    Label(co1_rect, text="Conditional Order 1", font=(Config.fontName2, Config.fontSize2, "bold"), bg='#F0F0F0').pack(pady=(10, 15))
+    
+    # Conditional Order1: Checkbox button
+    co1_row = Frame(co1_rect, bg='#F0F0F0')
+    co1_row.pack(fill=X, pady=8, padx=10)
+    Label(co1_row, text="Conditional Order:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co1_checkbox = Checkbutton(co1_row, text="Conditional Order1", variable=co1_selected, 
+                                font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0')
+    co1_checkbox.pack(side=RIGHT)
+    
+    # Input Stop Order Price
+    co1_stop_row = Frame(co1_rect, bg='#F0F0F0')
+    co1_stop_row.pack(fill=X, pady=8, padx=10)
+    Label(co1_stop_row, text="Input Stop Order Price:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co1_stop_price_var = StringVar(modal, value=co1_values[0] if len(co1_values) > 0 else "0")
+    co1_stop_price_entry = Entry(co1_stop_row, textvariable=co1_stop_price_var, width=18, font=(Config.fontName2, Config.fontSize2))
+    co1_stop_price_entry.pack(side=RIGHT)
+    
+    # Input Condition
+    co1_cond_row = Frame(co1_rect, bg='#F0F0F0')
+    co1_cond_row.pack(fill=X, pady=8, padx=10)
+    Label(co1_cond_row, text="Input Condition:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co1_condition_var = StringVar(modal)
+    co1_condition_combo = ttk.Combobox(co1_cond_row, textvariable=co1_condition_var, state="readonly", width=20, values=["Above", "Below"])
+    co1_condition_combo.set(co1_values[1] if len(co1_values) > 1 and co1_values[1] in ["Above", "Below"] else "Above")
+    co1_condition_combo.pack(side=RIGHT)
+    
+    # Input Price
+    co1_price_row = Frame(co1_rect, bg='#F0F0F0')
+    co1_price_row.pack(fill=X, pady=8, padx=10)
+    Label(co1_price_row, text="Input Price:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co1_price_var = StringVar(modal, value=co1_values[2] if len(co1_values) > 2 else "0")
+    co1_price_entry = Entry(co1_price_row, textvariable=co1_price_var, width=18, font=(Config.fontName2, Config.fontSize2))
+    co1_price_entry.pack(side=RIGHT)
+    
+    # Rectangle 2: Conditional Order2 (Right Half)
+    co2_rect = Frame(main_frame, relief=RAISED, borderwidth=2, bg='#F0F0F0')
+    co2_rect.pack(side=LEFT, fill=BOTH, expand=True, padx=(5, 0))
+    
+    # Title for Rectangle 2
+    Label(co2_rect, text="Conditional Order 2", font=(Config.fontName2, Config.fontSize2, "bold"), bg='#F0F0F0').pack(pady=(10, 15))
+    
+    # Conditional Order2: Checkbox button
+    co2_row = Frame(co2_rect, bg='#F0F0F0')
+    co2_row.pack(fill=X, pady=8, padx=10)
+    Label(co2_row, text="Conditional Order:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co2_checkbox = Checkbutton(co2_row, text="Conditional Order2", variable=co2_selected, 
+                                font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0')
+    co2_checkbox.pack(side=RIGHT)
+    
+    # Input Stop Order Price
+    co2_stop_row = Frame(co2_rect, bg='#F0F0F0')
+    co2_stop_row.pack(fill=X, pady=8, padx=10)
+    Label(co2_stop_row, text="Input Stop Order Price:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co2_stop_price_var = StringVar(modal, value=co2_values[0] if len(co2_values) > 0 else "0")
+    co2_stop_price_entry = Entry(co2_stop_row, textvariable=co2_stop_price_var, width=18, font=(Config.fontName2, Config.fontSize2))
+    co2_stop_price_entry.pack(side=RIGHT)
+    
+    # Input Condition 1
+    co2_cond1_row = Frame(co2_rect, bg='#F0F0F0')
+    co2_cond1_row.pack(fill=X, pady=8, padx=10)
+    Label(co2_cond1_row, text="Input Condition 1:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co2_condition1_var = StringVar(modal)
+    co2_condition1_combo = ttk.Combobox(co2_cond1_row, textvariable=co2_condition1_var, state="readonly", width=20, values=["Above", "Below"])
+    co2_condition1_combo.set(co2_values[1] if len(co2_values) > 1 and co2_values[1] in ["Above", "Below"] else "Above")
+    co2_condition1_combo.pack(side=RIGHT)
+    
+    # Input Price (for Condition 1)
+    co2_price1_row = Frame(co2_rect, bg='#F0F0F0')
+    co2_price1_row.pack(fill=X, pady=8, padx=10)
+    Label(co2_price1_row, text="Input Price:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co2_price1_var = StringVar(modal, value=co2_values[2] if len(co2_values) > 2 else "0")
+    co2_price1_entry = Entry(co2_price1_row, textvariable=co2_price1_var, width=18, font=(Config.fontName2, Config.fontSize2))
+    co2_price1_entry.pack(side=RIGHT)
+    
+    # Input Condition 2
+    co2_cond2_row = Frame(co2_rect, bg='#F0F0F0')
+    co2_cond2_row.pack(fill=X, pady=8, padx=10)
+    Label(co2_cond2_row, text="Input Condition 2:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co2_condition2_var = StringVar(modal)
+    co2_condition2_combo = ttk.Combobox(co2_cond2_row, textvariable=co2_condition2_var, state="readonly", width=20, values=["Above", "Below"])
+    co2_condition2_combo.set(co2_values[3] if len(co2_values) > 3 and co2_values[3] in ["Above", "Below"] else "Above")
+    co2_condition2_combo.pack(side=RIGHT)
+    
+    # Input Price (for Condition 2)
+    co2_price2_row = Frame(co2_rect, bg='#F0F0F0')
+    co2_price2_row.pack(fill=X, pady=8, padx=10)
+    Label(co2_price2_row, text="Input Price:", font=(Config.fontName2, Config.fontSize2), bg='#F0F0F0', width=20, anchor='w').pack(side=LEFT)
+    co2_price2_var = StringVar(modal, value=co2_values[4] if len(co2_values) > 4 else "0")
+    co2_price2_entry = Entry(co2_price2_row, textvariable=co2_price2_var, width=18, font=(Config.fontName2, Config.fontSize2))
+    co2_price2_entry.pack(side=RIGHT)
+    
+    # Make checkboxes mutually exclusive
+    def on_co1_check():
+        if co1_selected.get() == 1:
+            co2_selected.set(0)
+    
+    def on_co2_check():
+        if co2_selected.get() == 1:
+            co1_selected.set(0)
+    
+    co1_checkbox.config(command=on_co1_check)
+    co2_checkbox.config(command=on_co2_check)
+    
+    # Buttons frame at bottom
+    button_frame = Frame(modal)
+    button_frame.pack(pady=10)
+    
+    def save_value():
+        try:
+            # Validate all numeric inputs
+            float(co1_stop_price_var.get().strip() or "0")
+            float(co1_price_var.get().strip() or "0")
+            float(co2_stop_price_var.get().strip() or "0")
+            float(co2_price1_var.get().strip() or "0")
+            float(co2_price2_var.get().strip() or "0")
+            
+            # Store values in entry_points_entry (as JSON string or comma-separated)
+            # Format: co1_stop,co1_condition,co1_price,co2_stop,co2_cond1,co2_price1,co2_cond2,co2_price2
+            values = [
+                co1_stop_price_var.get().strip() or "0",
+                co1_condition_var.get() or "Above",
+                co1_price_var.get().strip() or "0",
+                co2_stop_price_var.get().strip() or "0",
+                co2_condition1_var.get() or "Above",
+                co2_price1_var.get().strip() or "0",
+                co2_condition2_var.get() or "Above",
+                co2_price2_var.get().strip() or "0"
+            ]
+            entry_points_entry.delete(0, END)
+            entry_points_entry.insert(0, ",".join(values))
+            modal.destroy()
+        except ValueError:
+            tkinter.messagebox.showerror("Invalid Input", "Please enter valid numbers for all price fields")
+            co1_stop_price_entry.focus()
+    
+    def cancel_dialog():
+        # Reset to previous selection if cancelled
+        modal.destroy()
+        trade_type_combo.current(previous_index)
+    
+    Button(button_frame, text="OK", width=8, command=save_value).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Cancel", width=8, command=cancel_dialog).pack(side=LEFT, padx=5)
+    
+    # Focus on first entry field
+    co1_stop_price_entry.focus()
     
     # Wait for modal to close
     modal.wait_window()
@@ -226,7 +429,7 @@ def NewTradeFrame(frame,connection):
     asyncio.ensure_future(pnl_check(IbConn))
     labelFrame = Frame(scrollable_frame)
     header_labels = ["Symbol", "Time Frame", "Profit", "Stop Loss", "Break Even",
-                     "Time In Force", "Trade Type", "Buy/Sell", "Risk", "Status", "ATR %", "Cancel"]
+                     "Time In Force", "Trade Type", "Buy/Sell", "Risk", "Replay", "Status", "ATR %", "Cancel"]
     for col in range(len(header_labels)):
         labelFrame.columnconfigure(col, weight=1, uniform="header")
     lblSymbol = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Symbol", justify=LEFT)
@@ -269,18 +472,21 @@ def NewTradeFrame(frame,connection):
     # risklbl.config(width=9)
     # risklbl.pack(side=LEFT)
 
+    replaylbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Replay", justify=LEFT)
+    replaylbl.grid(row=0, column=9, sticky="ew", padx=5)
+
     statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
-    statuslbl.grid(row=0, column=9, sticky="ew", padx=5)
+    statuslbl.grid(row=0, column=10, sticky="ew", padx=5)
 
     atrlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="ATR %", justify=LEFT)
-    atrlbl.grid(row=0, column=10, sticky="ew", padx=5)
+    atrlbl.grid(row=0, column=11, sticky="ew", padx=5)
 
     # statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Pre/Post", justify=LEFT)
     # statuslbl.config(width=9)
     # statuslbl.pack(side=LEFT)
 
     statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Cancel", justify=LEFT)
-    statuslbl.grid(row=0, column=11, sticky="ew", padx=5)
+    statuslbl.grid(row=0, column=12, sticky="ew", padx=5)
 
 
     labelFrame.pack(fill=X, padx=10, pady=5)
@@ -401,6 +607,17 @@ def execute_row(row_index):
         if current_sl_value == "":
             current_sl_value = "0"
 
+    # Get replay state for this row
+    is_replay_enabled = False
+    if row_index < len(replayEnabled):
+        is_replay_enabled = replayEnabled[row_index]
+
+    # Store replay state for this trade (will be retrieved in StatusUpdate)
+    trade_key = (symbol[row_index].get(), timeFrame[row_index].get(), tradeType[row_index].get(), 
+                 buySell[row_index].get(), datetime.datetime.now().timestamp())
+    Config.order_replay_pending[trade_key] = is_replay_enabled
+    logging.info("Stored replay state for trade: key=%s, replay=%s", trade_key, is_replay_enabled)
+
     send_future = asyncio.ensure_future(
         SendTrade(
             IbConn,
@@ -431,6 +648,21 @@ def execute_row(row_index):
     # Keep button enabled so user can cancel if needed
 
 
+def toggle_replay(row_index):
+    """Toggle replay mode for a row"""
+    if row_index < len(replayEnabled):
+        replayEnabled[row_index] = not replayEnabled[row_index]
+        # Update button appearance
+        if row_index < len(replayButtonList):
+            replayButton = replayButtonList[row_index]
+            if replayEnabled[row_index]:
+                replayButton.config(bg='#90EE90')  # Light green when enabled
+                logging.info("Replay enabled for row %s", row_index)
+            else:
+                replayButton.config(bg='#D3D3D3')  # Light gray when disabled
+                logging.info("Replay disabled for row %s", row_index)
+
+
 def cancel_row(row_index):
     async_task = row_async_tasks[row_index]
     butObj = cancelButton[row_index]
@@ -439,6 +671,11 @@ def cancel_row(row_index):
     row_async_tasks[row_index] = None
     _set_status(row_index, "Canceled")
     butObj.config(state="disabled")
+    # Disable replay when canceling
+    if row_index < len(replayEnabled):
+        replayEnabled[row_index] = False
+        if row_index < len(replayButtonList):
+            replayButtonList[row_index].config(bg='#D3D3D3')
 
 
 def addOldCache():
@@ -446,8 +683,9 @@ def addOldCache():
         value = Config.orderStatusData.get(key)
         if value.get("ordType") == "Entry":
             addField(0, "Sent")
-            symbol[len(symbol) - 1].delete(0, END)
-            symbol[len(symbol) - 1].insert(0, value.get("usersymbol"))
+            row_idx = len(symbol) - 1
+            symbol[row_idx].delete(0, END)
+            symbol[row_idx].insert(0, value.get("usersymbol"))
 
             timeFrame[len(timeFrame) - 1].current(Config.timeFrame.index(value.get("timeFrame")))
             takeProfit[len(takeProfit) - 1].current(Config.takeProfit.index(value.get("profit")))
@@ -468,6 +706,14 @@ def addOldCache():
             breakEven[len(breakEven) - 1].insert(0, value.get("breakEven"))
             timeInForce[len(timeInForce) - 1].current(Config.timeInForce.index(value.get("tif")))
 
+            # Set trade type if available
+            if value.get("barType") is not None and value.get("barType") in Config.entryTradeType:
+                tradeType[len(tradeType) - 1].current(Config.entryTradeType.index(value.get("barType")))
+                # If it's a pull back type, disable stop loss
+                pull_back_types = ['PBe1', 'PBe2', 'PBe1e2']
+                if value.get("barType") in pull_back_types:
+                    stopLoss[len(stopLoss) - 1].config(state="disabled")
+                    stopLossValue[len(stopLossValue) - 1].config(state="disabled")
 
             risk[len(risk) - 1].delete(0, END)
             risk[len(risk) - 1].insert(0, value.get("risk"))
@@ -476,10 +722,16 @@ def addOldCache():
             # else:
             #     outsideRTH[len(outsideRTH) - 1].insert(0, value.get("outsideRTH"))
 
-            disableEntryState(len(status) - 1)
-            row_idx = len(cancelButton) - 1
+            row_idx = len(status) - 1
+            disableEntryState(row_idx)
             cancelButton[row_idx].config(text="Cancel")
             cancelButton[row_idx]['command'] = lambda idx=row_idx: cancel_row(idx)
+            # Initialize replay state for cached rows
+            if len(replayEnabled) <= row_idx:
+                replayEnabled.append(False)
+                # Create a dummy replay button for cached rows (won't be visible but prevents index errors)
+                if len(replayButtonList) <= row_idx:
+                    replayButtonList.append(None)
 
 
 
@@ -488,7 +740,7 @@ def addField(rowYPosition, initial_status_text=""):
     logging.info("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
-    for col in range(12):
+    for col in range(13):
         field.columnconfigure(col, weight=1, uniform="row")
     firstEntry = Entry(field, width="10", textvariable=StringVar(field))
 
@@ -511,8 +763,8 @@ def addField(rowYPosition, initial_status_text=""):
     setDefaultProfit(profitEntry)
     takeProfit.append(profitEntry)
 
-    stpLossEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.stopLoss)
-    stpLossEntry.config(width=10)
+    stpLossEntry = ttk.Combobox(field, state="readonly", width="15", value=Config.stopLoss)
+    stpLossEntry.config(width=15)
     stpLossEntry.grid(row=0, column=3, sticky="ew", padx=5, pady=2)
     stpLossEntry.current(0)
     setDefaultStp(stpLossEntry)
@@ -562,8 +814,8 @@ def addField(rowYPosition, initial_status_text=""):
     timeInForce.append(timeForceEntry)
 
 
-    tradeTypeEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.entryTradeType)
-    tradeTypeEntry.config(width=10)
+    tradeTypeEntry = ttk.Combobox(field, state="readonly", width="18", value=Config.entryTradeType)
+    tradeTypeEntry.config(width=18)
     tradeTypeEntry.grid(row=0, column=6, sticky="ew", padx=5, pady=2)
     tradeTypeEntry.current(0)
     setDefaultEntryType(tradeTypeEntry)
@@ -584,12 +836,29 @@ def addField(rowYPosition, initial_status_text=""):
         combo = tradeTypeEntry
         entry_points_entry = entry_pointValueEntry
         current_selection = combo.get()
+        
+        # For pull back trade types (PBe1, PBe2, PBe1e2): disable/hide stop loss dropdown
+        pull_back_types = ['PBe1', 'PBe2', 'PBe1e2']
+        if current_selection in pull_back_types:
+            # Disable stop loss dropdown for pull back types
+            stpLossEntry.config(state="disabled")
+            stopLossValueEntry.config(state="disabled")
+        else:
+            # Re-enable stop loss dropdown for other trade types
+            stpLossEntry.config(state="readonly")
+            stopLossValueEntry.config(state="normal")
+        
         # If selecting Limit Order or Stop Order, show modal
         if current_selection in Config.manualOrderTypes:
             # The previous index is what was stored before this change
             combo._previous_index = previous_trade_type_index[0]
             order_type_name = current_selection
             _show_entry_price_modal(combo, entry_points_entry, order_type_name)
+        elif current_selection == "Conditional Order":
+            # The previous index is what was stored before this change
+            combo._previous_index = previous_trade_type_index[0]
+            order_type_name = current_selection
+            _show_conditional_order_modal(combo, entry_points_entry, order_type_name)
         else:
             # Update stored previous index for next time
             previous_trade_type_index[0] = combo.current()
@@ -620,11 +889,18 @@ def addField(rowYPosition, initial_status_text=""):
     # setDefaultQuantity(quantityEntry)
     # quantity.append(quantityEntry)
 
+    # Replay button
+    row_index_for_replay = len(symbol) - 1
+    replayButton = Button(field, width="10", height="1", text="Replay", bg='#D3D3D3')
+    replayButton.grid(row=0, column=9, sticky="ew", padx=5, pady=2)
+    replayEnabled.append(False)  # Initialize replay as disabled
+    replayButtonList.append(replayButton)  # Store button reference
+    replayButton['command'] = lambda idx=row_index_for_replay: toggle_replay(idx)
 
     statusVar = StringVar(field)
     statusEntry = Entry(field, width="9", textvariable=statusVar)
     statusEntry.config(width=9)
-    statusEntry.grid(row=0, column=9, sticky="ew", padx=5, pady=2)
+    statusEntry.grid(row=0, column=10, sticky="ew", padx=5, pady=2)
     status.append(statusEntry)
     _set_status(len(status) - 1, initial_status_text)
 
@@ -632,7 +908,7 @@ def addField(rowYPosition, initial_status_text=""):
     atrEntry = Entry(field, width="9", textvariable=atrVar)
     atrEntry.config(width=9)
     setDefaultAtr(atrEntry)
-    atrEntry.grid(row=0, column=10, sticky="ew", padx=5, pady=2)
+    atrEntry.grid(row=0, column=11, sticky="ew", padx=5, pady=2)
     atr.append(atrEntry)
 
     # outsideRTHEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.prePostBool)
@@ -643,12 +919,13 @@ def addField(rowYPosition, initial_status_text=""):
     # outsideRTH.append(outsideRTHEntry)
 
     row_index = len(symbol) - 1
-    row_async_tasks.append(None)
+    if len(row_async_tasks) <= row_index:
+        row_async_tasks.append(None)
 
     butCancle = Frame(field)
     but = Button(field, width="10", height="1", text="Execute")
     but['command'] = lambda idx=row_index: execute_row(idx)
-    but.grid(row=0, column=11, sticky="ew", padx=5, pady=2)
+    but.grid(row=0, column=12, sticky="ew", padx=5, pady=2)
     cancelButton.append(but)
 
 

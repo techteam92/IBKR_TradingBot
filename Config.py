@@ -48,6 +48,7 @@ defaultValue={}
 historicalData={}
 currentPnl = 0
 pbe1_saved = {}
+order_replay_pending = {}  # Map (symbol, timeFrame, barType, buySell, timestamp) to replay state for pending orders
 
 timeFrame = ['1 min', '2 mins', '3 mins', '5 mins', '10 mins', '15 mins', '30 mins','1 hour']
 timeDictInMinute ={'1 min':1, '2 mins':2, '3 mins':3, '5 mins':5, '10 mins':10, '15 mins':15, '20 mins':20, '30 mins':30, '1 hour':60,
@@ -70,7 +71,7 @@ timeInForce=['DAY','OTH','GTC']
 # recet bar [rb, recent bar BY Bar]
 # pullbacj divide in two -------------  new pbe1 (close second trade)   new e2   old pbe1e2
 manualOrderTypes = ['Stop Order','Limit Order']
-entryTradeType=manualOrderTypes + ['FB','RB','RBB','PBe1','PBe2','PBe1e2','LB','LB2','LB3']
+entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','PBe1e2','LB','LB2','LB3']
 buySell=['BUY','SELL']
 prePostBool=[False,True]
 breakEven =[False,True]
