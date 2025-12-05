@@ -25,8 +25,8 @@ class connection:
             data = Config.orderStatusData.get(trade.order.orderId)
             data.update({'status': trade.orderStatus.status})
             Config.orderStatusData.update({trade.order.orderId: data})
-            # Exclude manual orders (Stop Order, Limit Order) from sendTpAndSl during regular hours
-            # because they already send bracket orders. Extended hours manual orders need sendTpAndSl.
+            # Exclude manual orders (Stop Order, Limit Order) and RBB from sendTpAndSl during regular hours
+            # because they already send bracket orders. Extended hours manual orders and RBB need sendTpAndSl.
             is_manual_order = data.get('barType', '') in Config.manualOrderTypes
             is_extended_hours = data.get('outsideRth', False)
             ord_type = data.get('ordType', '')
@@ -44,19 +44,39 @@ class connection:
             # But since entryTradeType now starts with manualOrderTypes, we need different logic
             
             # For manual orders: send TP/SL only in extended hours (not in regular hours where bracket orders are used)
-            # For other trade types: send TP/SL (except FB which is handled differently)
+            # For other trade types: send TP/SL (except FB and PBe1 which use bracket orders in regular hours)
             if is_manual_order:
                 # Manual orders: only send TP/SL in extended hours
                 should_send_tp_sl = is_extended_hours
             else:
-                # Other trade types: send TP/SL (except FB which is entryTradeType[len(manualOrderTypes)])
-                # Since entryTradeType = manualOrderTypes + ['FB', ...], FB is at index len(manualOrderTypes)
-                fb_index = len(Config.manualOrderTypes)
-                should_send_tp_sl = data['barType'] != Config.entryTradeType[fb_index]
+                # Other trade types: send TP/SL (except FB, RB, RBB, and PBe1 which use bracket orders in regular hours)
+                # Since entryTradeType = manualOrderTypes + ['Conditional Order', 'FB', ...], FB is at index 3
+                # manualOrderTypes = ['Stop Order', 'Limit Order'] (indices 0, 1)
+                # entryTradeType[2] = 'Conditional Order', entryTradeType[3] = 'FB', entryTradeType[4] = 'RB', entryTradeType[5] = 'RBB', entryTradeType[6] = 'PBe1'
+                fb_index = 3
+                rb_index = 4
+                rbb_index = 5
+                pbe1_index = 6
+                # Exclude FB, RB, RBB, and PBe1 in regular hours (they use bracket orders)
+                # In extended hours, PBe1, RB, and RBB still need sendTpAndSl (don't use bracket orders)
+                is_fb = data['barType'] == Config.entryTradeType[fb_index]
+                is_rb = data['barType'] == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
+                is_rbb = data['barType'] == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
+                is_pbe1 = data['barType'] == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
+                if is_fb:
+                    should_send_tp_sl = False  # FB always uses bracket orders
+                elif is_pbe1:
+                    should_send_tp_sl = is_extended_hours  # PBe1 uses bracket orders in RTH, separate orders in extended hours
+                elif is_rb:
+                    should_send_tp_sl = is_extended_hours  # RB uses bracket orders in RTH, separate orders in extended hours
+                elif is_rbb:
+                    should_send_tp_sl = True  # RBB places only entry order in RTH, TP/SL sent after fill
+                else:
+                    should_send_tp_sl = True  # Other trade types always need sendTpAndSl
             
-            logging.info("orderStatusEvent: should_send_tp_sl=%s (barType != entryTradeType[0]: %s, not (is_manual_order and not is_extended_hours): %s)",
+            logging.info("orderStatusEvent: should_send_tp_sl=%s (barType != entryTradeType[3] (FB): %s, not (is_manual_order and not is_extended_hours): %s)",
                         should_send_tp_sl, 
-                        data['barType'] != Config.entryTradeType[0],
+                        data['barType'] != Config.entryTradeType[3],
                         not (is_manual_order and not is_extended_hours))
             
             if should_send_tp_sl:
@@ -532,18 +552,28 @@ class connection:
             i=0
             configTime = configTime.time().replace(microsecond=0)
             x=0
+            
+            # Get current time to determine if we're in premarket
+            current_time = datetime.datetime.now().time()
+            trading_time = datetime.datetime.strptime(str(datetime.datetime.now().date()) + " " + Config.tradingTime, "%Y-%m-%d %H:%M:%S").time()
+            is_premarket = current_time < trading_time
+            
+            # For PBe1: Include ALL bars from today (including premarket/postmarket)
+            # This allows PBe1 to work in premarket, regular hours, and after-hours
             for d in histData:
-
-                if (d.date.date() == datetime.datetime.now().date()) and (d.date.time() >= datetime.datetime.strptime(str(datetime.datetime.now().date()) + " " + Config.tradingTime, "%Y-%m-%d %H:%M:%S").time()):
-
+                if d.date.date() == datetime.datetime.now().date():
+                    # Include all bars from today (no time filter)
                     historical.update({x: {"date": d.date, "close": d.close,
                                                  "open": d.open, "high": d.high,
                                                  "low": d.low}})
                     x = x + 1
 
+            logging.info("pbe1_entry_historical_data: Found %s bars for today (premarket=%s, current_time=%s, trading_time=%s)", 
+                        len(historical), is_premarket, current_time, trading_time)
             return historical
         except Exception as e:
             logging.error('getHistoricalData ' + str(e))
+            return {}
 
     def fb_entry_historical_data(self,ibcontract,timeFrame,configTime):
         try:

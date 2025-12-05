@@ -271,8 +271,11 @@ def _show_conditional_order_modal(trade_type_combo, entry_points_entry, order_ty
             float(co2_price2_var.get().strip() or "0")
             
             # Store values in entry_points_entry (as JSON string or comma-separated)
-            # Format: co1_stop,co1_condition,co1_price,co2_stop,co2_cond1,co2_price1,co2_cond2,co2_price2
+            # Format: selected_order,co1_stop,co1_condition,co1_price,co2_stop,co2_cond1,co2_price1,co2_cond2,co2_price2
+            # selected_order: "1" for CO1, "2" for CO2, "0" for none
+            selected_order = "1" if co1_selected.get() == 1 else ("2" if co2_selected.get() == 1 else "0")
             values = [
+                selected_order,
                 co1_stop_price_var.get().strip() or "0",
                 co1_condition_var.get() or "Above",
                 co1_price_var.get().strip() or "0",
@@ -710,7 +713,7 @@ def addOldCache():
             if value.get("barType") is not None and value.get("barType") in Config.entryTradeType:
                 tradeType[len(tradeType) - 1].current(Config.entryTradeType.index(value.get("barType")))
                 # If it's a pull back type, disable stop loss
-                pull_back_types = ['PBe1', 'PBe2', 'PBe1e2']
+                pull_back_types = ['PBe1', 'PBe2']
                 if value.get("barType") in pull_back_types:
                     stopLoss[len(stopLoss) - 1].config(state="disabled")
                     stopLossValue[len(stopLossValue) - 1].config(state="disabled")
