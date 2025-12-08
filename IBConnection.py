@@ -57,20 +57,21 @@ class connection:
                 rb_index = 4
                 rbb_index = 5
                 pbe1_index = 6
-                # Exclude FB, RB, RBB, and PBe1 in regular hours (they use bracket orders)
-                # In extended hours, PBe1, RB, and RBB still need sendTpAndSl (don't use bracket orders)
+                # Exclude FB and RB in regular hours (they use bracket orders)
+                # RBB and PBe1 place only entry order in RTH, TP/SL sent after fill (like RBB)
+                # In extended hours, RB and RBB still need sendTpAndSl (don't use bracket orders)
                 is_fb = data['barType'] == Config.entryTradeType[fb_index]
                 is_rb = data['barType'] == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
                 is_rbb = data['barType'] == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
                 is_pbe1 = data['barType'] == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
                 if is_fb:
                     should_send_tp_sl = False  # FB always uses bracket orders
-                elif is_pbe1:
-                    should_send_tp_sl = is_extended_hours  # PBe1 uses bracket orders in RTH, separate orders in extended hours
                 elif is_rb:
                     should_send_tp_sl = is_extended_hours  # RB uses bracket orders in RTH, separate orders in extended hours
                 elif is_rbb:
                     should_send_tp_sl = True  # RBB places only entry order in RTH, TP/SL sent after fill
+                elif is_pbe1:
+                    should_send_tp_sl = True  # PBe1 places only entry order in RTH (like RBB), TP/SL sent after fill
                 else:
                     should_send_tp_sl = True  # Other trade types always need sendTpAndSl
             
@@ -303,13 +304,24 @@ class connection:
         except AssertionError as e:
             # This happens when ib_insync detects the order is already in a done state
             # Usually means the order ID was reused or there's a cached Trade object
-            error_msg = f"AssertionError placing order {order.orderId}: Order may already be in a done state. " \
-                       f"This can happen if order IDs are reused. Try again with a new order ID."
-            logging.error(error_msg)
-            logging.error("Order details: orderId=%s, orderType=%s, action=%s, status=%s", 
+            # Retry with a new order ID
+            logging.warning(f"AssertionError placing order {order.orderId}: Order may already be in a done state. Retrying with new order ID...")
+            logging.warning("Order details: orderId=%s, orderType=%s, action=%s, status=%s", 
                          order.orderId, order.orderType, order.action, 
                          getattr(self.ib.trades().get(order.orderId, None), 'orderStatus.status', 'N/A') if order.orderId in self.ib.trades() else 'N/A')
-            raise Exception(error_msg) from e
+            
+            # Try once more with a new order ID
+            try:
+                new_order_id = self.get_next_order_id()
+                order.orderId = new_order_id
+                logging.info(f"Retrying order placement with new order ID: {new_order_id}")
+                response = self.ib.placeOrder(contract=contract, order=order)
+                return response
+            except Exception as retry_error:
+                error_msg = f"AssertionError placing order {order.orderId}: Order may already be in a done state. " \
+                           f"Retry with new order ID {new_order_id} also failed: {retry_error}"
+                logging.error(error_msg)
+                raise Exception(error_msg) from retry_error
 
     def _get_price_for_overnight_order(self, contract, action):
         """Get price for overnight order - tries multiple methods"""
