@@ -80,10 +80,15 @@ class connection:
                         data['barType'] != Config.entryTradeType[3],
                         not (is_manual_order and not is_extended_hours))
             
-            if should_send_tp_sl:
+            # Only call sendTpAndSl when entry order is Filled (not for PendingCancel, Submitted, etc.)
+            # This prevents duplicate TP/SL orders when entry order is being updated (cancelled/replaced)
+            if should_send_tp_sl and trade.orderStatus.status == 'Filled' and ord_type == 'Entry':
                 logging.info("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s",
                             trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
                 sendTpAndSl(self, data)
+            elif should_send_tp_sl:
+                logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s (status != 'Filled' or ordType != 'Entry')",
+                            trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
             else:
                 logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
                             trade.order.orderId, bar_type, ord_type)
