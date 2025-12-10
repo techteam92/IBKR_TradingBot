@@ -284,22 +284,31 @@ class connection:
                 logging.info("%s session: passing order type %s without conversion", session, order.orderType)
 
         # Check if a Trade already exists for this order ID and handle it
-        # This prevents AssertionError when ib_insync detects an order in done state
+        # This prevents Error 105 (Order being modified does not match original order) and AssertionError
         try:
             existing_trades = self.ib.trades()
             # ib.trades() returns a dict-like object keyed by order ID
             if order.orderId and hasattr(existing_trades, '__contains__') and order.orderId in existing_trades:
                 existing_trade = existing_trades[order.orderId]
-                if hasattr(existing_trade, 'orderStatus') and existing_trade.orderStatus.status in ['Filled', 'Cancelled', 'Inactive']:
-                    logging.warning("Order ID %s already has a Trade in done state (%s). This may cause issues.", 
-                                  order.orderId, existing_trade.orderStatus.status)
-                    # Try to remove it from the trades collection
+                existing_status = existing_trade.orderStatus.status if hasattr(existing_trade, 'orderStatus') else 'Unknown'
+                old_order_id = order.orderId
+                
+                # If order exists (regardless of status), we need a new order ID to avoid Error 105
+                # IBKR will try to modify the existing order if we use the same ID, which causes Error 105
+                logging.warning("Order ID %s already exists with status '%s'. Getting new order ID to avoid Error 105.", 
+                              old_order_id, existing_status)
+                new_order_id = self.get_next_order_id()
+                order.orderId = new_order_id
+                logging.info("Assigned new order ID: %s (was %s)", new_order_id, old_order_id)
+                
+                # If the existing order is in a done state, try to remove it from the trades collection
+                if existing_status in ['Filled', 'Cancelled', 'Inactive']:
                     try:
                         if hasattr(existing_trades, '__delitem__'):
-                            del existing_trades[order.orderId]
-                            logging.info("Removed existing done Trade for orderId %s", order.orderId)
+                            del existing_trades[old_order_id]
+                            logging.info("Removed existing done Trade for old orderId %s", old_order_id)
                     except Exception as e:
-                        logging.warning("Could not remove existing Trade for orderId %s: %s", order.orderId, e)
+                        logging.warning("Could not remove existing Trade for orderId %s: %s", old_order_id, e)
         except Exception as e:
             logging.debug("Error checking existing trades: %s (this is usually fine)", e)
         
