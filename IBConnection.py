@@ -49,22 +49,27 @@ class connection:
                 # Manual orders: only send TP/SL in extended hours
                 should_send_tp_sl = is_extended_hours
             else:
-                # Other trade types: send TP/SL (except FB, RB, RBB, and PBe1 which use bracket orders in regular hours)
+                # Other trade types: send TP/SL (except FB, Conditional Order, RB, RBB, and PBe1 which use bracket orders in regular hours)
                 # Since entryTradeType = manualOrderTypes + ['Conditional Order', 'FB', ...], FB is at index 3
                 # manualOrderTypes = ['Stop Order', 'Limit Order'] (indices 0, 1)
                 # entryTradeType[2] = 'Conditional Order', entryTradeType[3] = 'FB', entryTradeType[4] = 'RB', entryTradeType[5] = 'RBB', entryTradeType[6] = 'PBe1'
+                conditional_order_index = 2
                 fb_index = 3
                 rb_index = 4
                 rbb_index = 5
                 pbe1_index = 6
-                # Exclude FB and RB in regular hours (they use bracket orders)
+                # Exclude FB, Conditional Order, and RB in regular hours (they use bracket orders)
+                # Conditional Order uses bracket orders in RTH (like Custom entry), but needs sendTpAndSl in extended hours
                 # RBB and PBe1 place only entry order in RTH, TP/SL sent after fill (like RBB)
                 # In extended hours, RB and RBB still need sendTpAndSl (don't use bracket orders)
+                is_conditional_order = data['barType'] == Config.entryTradeType[conditional_order_index] if len(Config.entryTradeType) > conditional_order_index else False
                 is_fb = data['barType'] == Config.entryTradeType[fb_index]
                 is_rb = data['barType'] == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
                 is_rbb = data['barType'] == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
                 is_pbe1 = data['barType'] == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
-                if is_fb:
+                if is_conditional_order:
+                    should_send_tp_sl = is_extended_hours  # Conditional Order uses bracket orders in RTH, separate orders in extended hours
+                elif is_fb:
                     should_send_tp_sl = False  # FB always uses bracket orders
                 elif is_rb:
                     should_send_tp_sl = is_extended_hours  # RB uses bracket orders in RTH, separate orders in extended hours
@@ -673,6 +678,16 @@ class connection:
             oldRow=None
             historical ={}
 
+            # If configTime is None, return the latest bar data without time filtering
+            if configTime is None:
+                if len(histData) > 0:
+                    latest_bar = histData[-1]
+                    historical = {"close": latest_bar.close, "open": latest_bar.open, "high": latest_bar.high, "low": latest_bar.low, "dateTime": latest_bar.date}
+                    logging.info("historical data found (latest bar, no time filter) %s ", historical)
+                    return historical
+                else:
+                    logging.info("No historical data available")
+                    return {}
 
             configTime = configTime.time().replace(microsecond=0)
             for data in histData:
