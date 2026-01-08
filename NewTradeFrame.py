@@ -432,7 +432,7 @@ def NewTradeFrame(frame,connection):
     asyncio.ensure_future(pnl_check(IbConn))
     labelFrame = Frame(scrollable_frame)
     header_labels = ["Symbol", "Time Frame", "Profit", "Stop Loss", "Break Even",
-                     "Time In Force", "Trade Type", "Buy/Sell", "Risk", "Replay", "Status", "ATR %", "Cancel"]
+                     "Time In Force", "Trade Type", "Buy/Sell", "Risk", "Replay", "Status", "Cancel"]
     for col in range(len(header_labels)):
         labelFrame.columnconfigure(col, weight=1, uniform="header")
     lblSymbol = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Symbol", justify=LEFT)
@@ -481,15 +481,8 @@ def NewTradeFrame(frame,connection):
     statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
     statuslbl.grid(row=0, column=10, sticky="ew", padx=5)
 
-    atrlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="ATR %", justify=LEFT)
-    atrlbl.grid(row=0, column=11, sticky="ew", padx=5)
-
-    # statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Pre/Post", justify=LEFT)
-    # statuslbl.config(width=9)
-    # statuslbl.pack(side=LEFT)
-
     statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Cancel", justify=LEFT)
-    statuslbl.grid(row=0, column=12, sticky="ew", padx=5)
+    statuslbl.grid(row=0, column=11, sticky="ew", padx=5)
 
 
     labelFrame.pack(fill=X, padx=10, pady=5)
@@ -743,7 +736,7 @@ def addField(rowYPosition, initial_status_text=""):
     logging.info("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
-    for col in range(13):
+    for col in range(12):
         field.columnconfigure(col, weight=1, uniform="row")
     firstEntry = Entry(field, width="10", textvariable=StringVar(field))
 
@@ -907,11 +900,10 @@ def addField(rowYPosition, initial_status_text=""):
     status.append(statusEntry)
     _set_status(len(status) - 1, initial_status_text)
 
-    atrVar = StringVar(field,Config.atrValue)
-    atrEntry = Entry(field, width="9", textvariable=atrVar)
-    atrEntry.config(width=9)
-    setDefaultAtr(atrEntry)
-    atrEntry.grid(row=0, column=11, sticky="ew", padx=5, pady=2)
+    # ATR % field removed - functionality removed
+    # Create a hidden entry with default value to maintain compatibility
+    atrVar = StringVar(field, "0")
+    atrEntry = Entry(field, width="0")  # Hidden entry
     atr.append(atrEntry)
 
     # outsideRTHEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.prePostBool)
@@ -928,7 +920,7 @@ def addField(rowYPosition, initial_status_text=""):
     butCancle = Frame(field)
     but = Button(field, width="10", height="1", text="Execute")
     but['command'] = lambda idx=row_index: execute_row(idx)
-    but.grid(row=0, column=12, sticky="ew", padx=5, pady=2)
+    but.grid(row=0, column=11, sticky="ew", padx=5, pady=2)
     cancelButton.append(but)
 
 
@@ -956,7 +948,8 @@ def disableEntryState(row_index=None):
     symbol[row_index].config(state="disabled")
     risk[row_index].config(state="disabled")
     status[row_index].config(state="disabled")
-    atr[row_index].config(state="disabled")
+    # ATR field disabled - functionality removed
+    # atr[row_index].config(state="disabled")
     stopLossValue[row_index].config(state="disabled")
     entry_points[row_index].config(state="disabled")
     
@@ -984,7 +977,8 @@ def enableEntryState(row_index):
     risk[row_index].config(state="normal")
     status[row_index].config(state="normal")
     buySell[row_index].config(state="readonly")
-    atr[row_index].config(state="normal")
+    # ATR field disabled - functionality removed
+    # atr[row_index].config(state="normal")
 
 
 

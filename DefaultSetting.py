@@ -89,11 +89,15 @@ def content():
     setDefaultRisk(riskEntry)
     data.update({"risk": riskEntry})
 
-    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="ATR:- ", justify=LEFT).place(
-        x=20, y=230)
-    atrEntry = Entry(settingFrame, width="13", textvariable=StringVar(settingFrame))
-    atrEntry.place(x=150, y=232)
-    setDefaultAtr(atrEntry)
+    # ATR field disabled - functionality removed
+    # Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="ATR:- ", justify=LEFT).place(
+    #     x=20, y=230)
+    # atrEntry = Entry(settingFrame, width="13", textvariable=StringVar(settingFrame))
+    # atrEntry.place(x=150, y=232)
+    # setDefaultAtr(atrEntry)
+    # Create a hidden entry with default value to maintain compatibility
+    atrEntry = Entry(settingFrame, width="0")
+    atrEntry.insert(0, "0")
     data.update({"atr": atrEntry})
 
     # Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Pre/Post:- ", justify=LEFT).place(

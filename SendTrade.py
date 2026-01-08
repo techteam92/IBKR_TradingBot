@@ -567,9 +567,10 @@ async def first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,bar
             await  asyncio.sleep(1)
             continue
 
-        if (atrCheck(histData, ibContract, connection, atrPercentage)):
-            await  asyncio.sleep(1)
-            continue
+        # ATR check functionality removed
+        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
+        #     await  asyncio.sleep(1)
+        #     continue
         logging.info("Trade action found for market order %s for %s contract ", tradeType, ibContract)
         # connection.cancelTickData(ibContract)
 
@@ -752,28 +753,29 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             await  asyncio.sleep(1)
             continue
 
+        # ATR check functionality removed
         # During overnight, skip ATR check as it may be too restrictive with limited liquidity
-        if outsideRth:
-            session = _get_current_session()
-            if session == 'OVERNIGHT':
-                logging.info("OVERNIGHT session: Skipping ATR check to allow trade execution")
-            else:
-                # Pre-market/After-hours: still check ATR
-                logging.info("RB: Checking ATR for pre-market/after-hours (session=%s)", session)
-                if (atrCheck(histData, ibContract, connection, atrPercentage)):
-                    logging.warning("RB: ATR check failed - bar range too large, retrying...")
-                    await  asyncio.sleep(1)
-                    continue
-                logging.info("RB: ATR check passed for pre-market/after-hours")
-        else:
-            # Regular hours: check ATR
-            logging.info("RB RTH: Checking ATR before placing order")
-            atr_check_result = atrCheck(histData, ibContract, connection, atrPercentage)
-            if atr_check_result:
-                logging.warning("RB RTH: ATR check failed - bar range too large, retrying... (histData=%s, atrPercentage=%s)", histData, atrPercentage)
-                await  asyncio.sleep(1)
-                continue
-            logging.info("RB RTH: ATR check passed, proceeding to place order")
+        # if outsideRth:
+        #     session = _get_current_session()
+        #     if session == 'OVERNIGHT':
+        #         logging.info("OVERNIGHT session: Skipping ATR check to allow trade execution")
+        #     else:
+        #         # Pre-market/After-hours: still check ATR
+        #         logging.info("RB: Checking ATR for pre-market/after-hours (session=%s)", session)
+        #         if (atrCheck(histData, ibContract, connection, atrPercentage)):
+        #             logging.warning("RB: ATR check failed - bar range too large, retrying...")
+        #             await  asyncio.sleep(1)
+        #             continue
+        #         logging.info("RB: ATR check passed for pre-market/after-hours")
+        # else:
+        #     # Regular hours: check ATR
+        #     logging.info("RB RTH: Checking ATR before placing order")
+        #     atr_check_result = atrCheck(histData, ibContract, connection, atrPercentage)
+        #     if atr_check_result:
+        #         logging.warning("RB RTH: ATR check failed - bar range too large, retrying... (histData=%s, atrPercentage=%s)", histData, atrPercentage)
+        #         await  asyncio.sleep(1)
+        #         continue
+        #     logging.info("RB RTH: ATR check passed, proceeding to place order")
         logging.info("RBRR Trade action found for market order %s for %s contract ", tradeType, ibContract)
         # connection.cancelTickData(ibContract)
 
@@ -1695,8 +1697,16 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
             logging.error("Invalid risk amount for manual stop order: %s", risk)
             return
         
+        # For ATR stop loss: calculate quantity directly using ATR stop_size
         # For Custom stop loss: calculate quantity directly using stop_size
-        if stopLoss == Config.stopLoss[1]:  # 'Custom'
+        if stopLoss in Config.atrStopLossMap:
+            # Quantity = risk / stop_size (ATR-based), rounded UP
+            qty = risk_amount / stop_size
+            qty = int(math.ceil(qty))  # Round UP
+            if qty <= 0:
+                qty = 1
+            logging.info("ATR stop loss quantity: risk=%s, stop_size=%s (ATR-based), quantity=%s (rounded up)", risk_amount, stop_size, qty)
+        elif stopLoss == Config.stopLoss[1]:  # 'Custom'
             # Quantity = risk / stop_size, rounded UP
             qty = risk_amount / stop_size
             qty = int(math.ceil(qty))  # Round UP
@@ -1708,9 +1718,9 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
             qty = _calculate_manual_quantity(actual_entry_price, stop_loss_price, risk_amount)
         
         # Calculate take profit price based on stop size and profit multiplier
-        # TP = actual_entry + (stop_size × multiplier) for BUY
-        # TP = actual_entry - (stop_size × multiplier) for SELL
-        # For Custom stop loss: Use entry_price (not actual_entry_price) for TP calculation
+        # TP = base_price + (stop_size × multiplier) for BUY
+        # TP = base_price - (stop_size × multiplier) for SELL
+        # For ATR and Custom stop loss: Use entry_price (not actual_entry_price) for TP calculation
         # to ensure consistency with stop_size calculation
         multiplier_map = {
             Config.takeProfit[0]: 1,    # 1:1
@@ -1723,9 +1733,12 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
         multiplier = multiplier_map.get(profit, 1)  # Default to 1:1 if not found
         tp_offset = stop_size * multiplier
         
+        # For ATR stop loss: Use entry_price for TP calculation (consistent with ATR stop_size)
         # For Custom stop loss: Use entry_price for TP calculation (tp_base_price was set above)
         # For other stop loss types: Use actual_entry_price
-        if stopLoss == Config.stopLoss[1]:  # 'Custom'
+        if stopLoss in Config.atrStopLossMap:
+            tp_base_price = entry_price  # Use entry_price for consistency with ATR stop_size calculation
+        elif stopLoss == Config.stopLoss[1]:  # 'Custom'
             tp_base_price = entry_price  # Use entry_price for consistency with stop_size calculation
         else:
             tp_base_price = actual_entry_price  # Use actual_entry_price for other stop loss types
@@ -1884,7 +1897,40 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
             # - Entry limit price = entry stop price ± 0.5 * stop_size
             # - For EntryBar stop loss: stop_size is derived from bar high/low ± 0.01 minus entry stop price
             if barType == 'Custom':
-                # CASE 1: Custom entry + Custom stop loss
+                # CASE 1: Custom entry + ATR stop loss
+                # In this case we already calculated:
+                #   - entry_price  = custom entry (from entry_points)
+                #   - stop_size  = ATR * percentage (from _get_atr_stop_offset)
+                #   - stop_loss_price = actual_entry_price ± stop_size
+                #   - qty = risk / stop_size (ATR-based)
+                # Entry STP LMT should be:
+                #   - Stop  = custom entry
+                #   - Limit = custom entry ± 0.5 * stop_size (ATR-based)
+                if stopLoss in Config.atrStopLossMap:
+                    entry_stop_price = round(entry_price, Config.roundVal)
+                    entry_limit_offset = round(stop_size * 0.5, Config.roundVal)
+                    if buySellType == 'BUY':
+                        entry_limit_price = round(entry_stop_price + entry_limit_offset, Config.roundVal)
+                    else:
+                        entry_limit_price = round(entry_stop_price - entry_limit_offset, Config.roundVal)
+
+                    logging.info(
+                        "Extended hours Custom+ATR: Entry STP LMT - Stop=%s, Limit=%s, "
+                        "entry=%s, stop_loss=%s, stop_size=%s (ATR-based), qty=%s, symbol=%s, action=%s",
+                        entry_stop_price, entry_limit_price, entry_price, stop_loss_price, stop_size, qty, symbol, buySellType
+                    )
+
+                    entry_order = Order(
+                        orderId=parent_order_id,
+                        orderType="STP LMT",
+                        action=buySellType,
+                        totalQuantity=qty,
+                        auxPrice=entry_stop_price,      # Stop trigger = custom entry
+                        lmtPrice=entry_limit_price,     # Limit around custom entry (ATR-based)
+                        tif=tif,
+                        transmit=True  # TP/SL will be sent after fill
+                    )
+                # CASE 2: Custom entry + Custom stop loss
                 # In this case we already calculated:
                 #   - entry_price  = custom entry (from entry_points)
                 #   - stop_loss_price = custom_stop (from slValue)
@@ -1892,7 +1938,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 # We must NOT override these with bar-based values. Entry STP LMT should be:
                 #   - Stop  = custom entry
                 #   - Limit = custom entry ± 0.5 * stop_size
-                if stopLoss == Config.stopLoss[1]:  # 'Custom' stop loss
+                elif stopLoss == Config.stopLoss[1]:  # 'Custom' stop loss
                     entry_stop_price = round(entry_price, Config.roundVal)
                     entry_limit_offset = round(stop_size * 0.5, Config.roundVal)
                     if buySellType == 'BUY':
@@ -2977,9 +3023,10 @@ async def lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
         lastPrice = round(lastPrice, Config.roundVal)
         logging.info("lb1 Price found for market order %s for %s contract ", lastPrice, ibContract)
-        if (atrCheck(histData, ibContract, connection, atrPercentage)):
-            await  asyncio.sleep(1)
-            continue
+        # ATR check functionality removed
+        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
+        #     await  asyncio.sleep(1)
+        #     continue
         logging.info("lb1 Trade action found for market order %s for %s contract ", tradeType, ibContract)
         logging.info(
             "lb1 Trade quantity found for market order %s for %s contract and candle data is %s and last bar data %s",
@@ -3122,9 +3169,10 @@ async def lb2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
         lastPrice = round(lastPrice, Config.roundVal)
         logging.info("lb2 Price found for market order %s for %s contract ", lastPrice, ibContract)
-        if (atrCheck(histData, ibContract, connection, atrPercentage)):
-            await  asyncio.sleep(1)
-            continue
+        # ATR check functionality removed
+        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
+        #     await  asyncio.sleep(1)
+        #     continue
         logging.info("lb2 Trade action found for market order %s for %s contract ", tradeType, ibContract)
         logging.info(
             "lb2 Trade quantity found for market order %s for %s contract and candle data is %s and last bar data %s",
@@ -3263,9 +3311,10 @@ async def lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
         lastPrice = round(lastPrice, Config.roundVal)
         logging.info("lb3 Price found for market order %s for %s contract ", lastPrice, ibContract)
-        if (atrCheck(histData, ibContract, connection, atrPercentage)):
-            await  asyncio.sleep(1)
-            continue
+        # ATR check functionality removed
+        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
+        #     await  asyncio.sleep(1)
+        #     continue
         logging.info("lb3 Trade action found for market order %s for %s contract ", tradeType, ibContract)
         logging.info(
             "lb3 Trade quantity found for market order %s for %s contract and candle data is %s and last bar data %s",
@@ -3372,9 +3421,31 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
             await asyncio.sleep(1)
             continue
         
-        # PBe2: Use buySellType directly (no condition checking) - same as PBe1
-        pbe1_tradeType = buySellType
-        logging.info("PBe2: Using user-selected trade type %s for PBe1 simulation (no condition checking) - same as PBe1", pbe1_tradeType)
+        # PBe2: First check PBe1 condition (must wait until PBe1 condition is met)
+        # Use pbe1_result() to check if PBe1 condition is satisfied
+        pbe1_tradeType, pbe1_result_row = pbe1_result(last_candel, complete_bar_data)
+        logging.info("PBe2: Checking PBe1 condition using pbe1_result: tradeType=%s, result_row=%s", pbe1_tradeType, pbe1_result_row)
+        
+        # Wait until PBe1 condition is met (but don't place any order for PBe1)
+        if pbe1_tradeType == "" or pbe1_tradeType is None:
+            logging.info("PBe2: PBe1 condition not met yet (tradeType=%s). Waiting for PBe1 condition to be satisfied...", pbe1_tradeType)
+            sleepTime = getSleepTime(timeFrame, outsideRth)
+            if sleepTime == 0:
+                sleepTime = 1
+            await asyncio.sleep(sleepTime)
+            continue
+        
+        # Check if PBe1 condition matches user's selected direction
+        if buySellType != pbe1_tradeType:
+            logging.info("PBe2: PBe1 condition found (%s) but doesn't match user direction (%s). Waiting for matching condition...", 
+                        pbe1_tradeType, buySellType)
+            sleepTime = getSleepTime(timeFrame, outsideRth)
+            if sleepTime == 0:
+                sleepTime = 1
+            await asyncio.sleep(sleepTime)
+            continue
+        
+        logging.info("PBe2: PBe1 condition is met! tradeType=%s matches user direction. Proceeding to simulate PBe1 (NO ORDER WILL BE PLACED)", pbe1_tradeType)
         
         # PBe1 simulation: Calculate entry price and stop loss (but DON'T place order)
         logging.info("PBe2: Simulating PBe1! tradeType=%s. Calculating entry price and stop loss (NO ORDER WILL BE PLACED)", pbe1_tradeType)
@@ -3403,10 +3474,12 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         pbe1_stop_loss_price = round(pbe1_stop_loss_price, Config.roundVal) if pbe1_stop_loss_price else 0
         
         logging.info(f"PBe2: PBe1 would have: entry_price={pbe1_entry_price}, stop_loss_price={pbe1_stop_loss_price}, stop_size={pbe1_stop_size}, LOD={lod}, HOD={hod}")
-        logging.info("PBe2: Monitoring for PBe1 stop out (price must hit stop loss level before checking PBe2 condition)")
+        logging.info("PBe2: Monitoring for PBe1 entry fill, then stop out (price must hit entry price first, then stop loss)")
         
-        # Step 2: Monitor if PBe1 would have stopped out
-        # Get current price and check if it has moved past stop loss level
+        # Step 2: Monitor PBe1 simulation - first wait for entry fill, then wait for stop out
+        # CRITICAL: We need to wait for:
+        # 1. PBe1 entry to be filled (price must hit entry price)
+        # 2. THEN PBe1 to stop out (price must hit stop loss)
         # Use historical data instead of live market data to avoid subscription issues
         ticker = None
         try:
@@ -3416,6 +3489,9 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         except Exception as e:
             logging.debug("PBe2: Could not subscribe to market data, will use historical data: %s", e)
             ticker = None
+        
+        pbe1_entry_filled = False  # Track if PBe1 entry would have been filled
+        last_processed_bar_datetime = last_candel.get('date') if last_candel else None  # Track last processed bar to detect new bars
         
         try:
             while True:
@@ -3433,46 +3509,157 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                             pass
                     
                     # Fallback to historical data (more reliable and doesn't require subscription)
+                    latest_bar_data = None
+                    latest_bar = None
                     if current_price is None:
                         latest_bar_data = connection.pbe1_entry_historical_data(ibContract, timeFrame, chartTime)
                         if latest_bar_data and len(latest_bar_data) > 0:
-                            current_price = float(latest_bar_data[-1].get('close', 0))
+                            # Use high/low from latest bar to check if entry was hit
+                            latest_bar = latest_bar_data[-1]
+                            if pbe1_tradeType == 'BUY':
+                                current_price = float(latest_bar.get('high', latest_bar.get('close', 0)))  # Use high for BUY entry check
+                            else:  # SELL
+                                current_price = float(latest_bar.get('low', latest_bar.get('close', 0)))  # Use low for SELL entry check
                         else:
                             current_price = float(last_candel.get('close', 0))
                     
                     current_price = round(current_price, Config.roundVal)
                     
-                    # Check if price has hit stop loss level
-                    if pbe1_tradeType == 'BUY':
-                        # BUY position: stop out if price <= LOD (price hits or goes below stop loss)
-                        if current_price > pbe1_stop_loss_price:
-                            logging.info("PBe2: Current price=%s > stop_loss=%s (LOD). PBe1 would not have stopped out yet. Waiting...", 
-                                       current_price, pbe1_stop_loss_price)
-                            sleepTime = getSleepTime(timeFrame, outsideRth)
-                            if sleepTime == 0:
-                                sleepTime = 1
-                            await asyncio.sleep(sleepTime)
-                            continue
-                        else:
-                            logging.info("PBe2: Current price=%s <= stop_loss=%s (LOD). PBe1 would have stopped out! Proceeding to replay PBe1...", 
-                                       current_price, pbe1_stop_loss_price)
-                            break  # Exit monitoring loop, proceed to replay PBe1
-                    else:  # SELL
-                        # SELL position: stop out if price >= HOD (price hits or goes above stop loss)
-                        if current_price < pbe1_stop_loss_price:
-                            logging.info("PBe2: Current price=%s < stop_loss=%s (HOD). PBe1 would not have stopped out yet. Waiting...", 
-                                       current_price, pbe1_stop_loss_price)
-                            sleepTime = getSleepTime(timeFrame, outsideRth)
-                            if sleepTime == 0:
-                                sleepTime = 1
-                            await asyncio.sleep(sleepTime)
-                            continue
-                        else:
-                            logging.info("PBe2: Current price=%s >= stop_loss=%s (HOD). PBe1 would have stopped out! Proceeding to replay PBe1...", 
-                                       current_price, pbe1_stop_loss_price)
-                            break  # Exit monitoring loop, proceed to replay PBe1
+                    # Check if a new bar has closed (detect new bar by comparing datetime)
+                    new_bar_closed = False
+                    if latest_bar and 'date' in latest_bar:
+                        current_bar_datetime = latest_bar.get('date')
+                        if last_processed_bar_datetime and current_bar_datetime:
+                            try:
+                                # Compare datetimes
+                                if hasattr(last_processed_bar_datetime, 'replace'):
+                                    last_dt = last_processed_bar_datetime.replace(microsecond=0)
+                                else:
+                                    last_dt = last_processed_bar_datetime
+                                
+                                if hasattr(current_bar_datetime, 'replace'):
+                                    current_dt = current_bar_datetime.replace(microsecond=0)
+                                else:
+                                    current_dt = current_bar_datetime
+                                
+                                if current_dt > last_dt:
+                                    # New bar closed!
+                                    new_bar_closed = True
+                                    last_processed_bar_datetime = current_bar_datetime
+                                    logging.info("PBe2: New bar closed! (last=%s, new=%s). Will recalculate LOD/HOD if needed.", last_dt, current_dt)
+                            except Exception as e:
+                                logging.debug("PBe2: Error comparing bar datetimes: %s", e)
+                    
+                    # Step 2a: First check if PBe1 entry would have been filled
+                    if not pbe1_entry_filled:
+                        # CRITICAL: Recalculate LOD/HOD when new bar closes (LOD/HOD may have changed)
+                        # Only recalculate when a new bar closes to be efficient
+                        if new_bar_closed:
+                            updated_lod, updated_hod = _get_pbe1_lod_hod(connection, ibContract, timeFrame, pbe1_tradeType)
+                            
+                            # Update stop loss price with new LOD/HOD (for when entry is filled)
+                            if pbe1_tradeType == 'BUY':
+                                if updated_lod != lod:
+                                    logging.info("PBe2: New bar closed - LOD updated while waiting for entry fill! Old LOD=%s, New LOD=%s. Updating stop loss price.", lod, updated_lod)
+                                    lod = updated_lod
+                                    pbe1_stop_loss_price = lod
+                                    pbe1_stop_loss_price = round(pbe1_stop_loss_price, Config.roundVal)
+                            else:  # SELL
+                                if updated_hod != hod:
+                                    logging.info("PBe2: New bar closed - HOD updated while waiting for entry fill! Old HOD=%s, New HOD=%s. Updating stop loss price.", hod, updated_hod)
+                                    hod = updated_hod
+                                    pbe1_stop_loss_price = hod
+                                    pbe1_stop_loss_price = round(pbe1_stop_loss_price, Config.roundVal)
+                        
+                        if pbe1_tradeType == 'BUY':
+                            # BUY entry: filled if price >= entry_price
+                            if current_price >= pbe1_entry_price:
+                                pbe1_entry_filled = True
+                                logging.info("PBe2: PBe1 entry would have been FILLED! Current price=%s >= entry_price=%s. Now monitoring for stop out (LOD=%s)...", 
+                                           current_price, pbe1_entry_price, lod)
+                            else:
+                                logging.info("PBe2: Waiting for PBe1 entry fill. Current price=%s < entry_price=%s. Waiting... (LOD=%s)", 
+                                           current_price, pbe1_entry_price, lod)
+                                sleepTime = getSleepTime(timeFrame, outsideRth)
+                                if sleepTime == 0:
+                                    sleepTime = 1
+                                await asyncio.sleep(sleepTime)
+                                continue
+                        else:  # SELL
+                            # SELL entry: filled if price <= entry_price
+                            if current_price <= pbe1_entry_price:
+                                pbe1_entry_filled = True
+                                logging.info("PBe2: PBe1 entry would have been FILLED! Current price=%s <= entry_price=%s. Now monitoring for stop out (HOD=%s)...", 
+                                           current_price, pbe1_entry_price, hod)
+                            else:
+                                logging.info("PBe2: Waiting for PBe1 entry fill. Current price=%s > entry_price=%s. Waiting... (HOD=%s)", 
+                                           current_price, pbe1_entry_price, hod)
+                                sleepTime = getSleepTime(timeFrame, outsideRth)
+                                if sleepTime == 0:
+                                    sleepTime = 1
+                                await asyncio.sleep(sleepTime)
+                                continue
+                    
+                    # Step 2b: After entry is filled, monitor for stop out
+                    if pbe1_entry_filled:
+                        # CRITICAL: Recalculate LOD/HOD when new bar closes (LOD/HOD may have changed)
+                        # Only recalculate when a new bar closes to be efficient
+                        if new_bar_closed:
+                            updated_lod, updated_hod = _get_pbe1_lod_hod(connection, ibContract, timeFrame, pbe1_tradeType)
+                            
+                            # Update stop loss price with new LOD/HOD
+                            if pbe1_tradeType == 'BUY':
+                                pbe1_stop_loss_price = updated_lod  # BUY uses LOD
+                                if updated_lod != lod:
+                                    logging.info("PBe2: New bar closed - LOD updated! Old LOD=%s, New LOD=%s. Updating stop loss price.", lod, updated_lod)
+                                    lod = updated_lod  # Update for logging
+                            else:  # SELL
+                                pbe1_stop_loss_price = updated_hod  # SELL uses HOD
+                                if updated_hod != hod:
+                                    logging.info("PBe2: New bar closed - HOD updated! Old HOD=%s, New HOD=%s. Updating stop loss price.", hod, updated_hod)
+                                    hod = updated_hod  # Update for logging
+                            
+                            pbe1_stop_loss_price = round(pbe1_stop_loss_price, Config.roundVal)
+                        
+                        # Get current price for stop loss check (use close price, not high/low)
+                        if current_price is None or (ticker is None):
+                            latest_bar_data = connection.pbe1_entry_historical_data(ibContract, timeFrame, chartTime)
+                            if latest_bar_data and len(latest_bar_data) > 0:
+                                current_price = float(latest_bar_data[-1].get('close', 0))
+                            else:
+                                current_price = float(last_candel.get('close', 0))
+                            current_price = round(current_price, Config.roundVal)
+                        
+                        if pbe1_tradeType == 'BUY':
+                            # BUY position: stop out if price <= LOD (price hits or goes below stop loss)
+                            if current_price > pbe1_stop_loss_price:
+                                logging.info("PBe2: PBe1 entry filled. Current price=%s > stop_loss=%s (LOD=%s). PBe1 would not have stopped out yet. Waiting...", 
+                                           current_price, pbe1_stop_loss_price, lod)
+                                sleepTime = getSleepTime(timeFrame, outsideRth)
+                                if sleepTime == 0:
+                                    sleepTime = 1
+                                await asyncio.sleep(sleepTime)
+                                continue
+                            else:
+                                logging.info("PBe2: PBe1 entry filled AND stopped out! Current price=%s <= stop_loss=%s (LOD=%s). Proceeding to replay PBe1...", 
+                                           current_price, pbe1_stop_loss_price, lod)
+                                break  # Exit monitoring loop, proceed to replay PBe1
+                        else:  # SELL
+                            # SELL position: stop out if price >= HOD (price hits or goes above stop loss)
+                            if current_price < pbe1_stop_loss_price:
+                                logging.info("PBe2: PBe1 entry filled. Current price=%s < stop_loss=%s (HOD=%s). PBe1 would not have stopped out yet. Waiting...", 
+                                           current_price, pbe1_stop_loss_price, hod)
+                                sleepTime = getSleepTime(timeFrame, outsideRth)
+                                if sleepTime == 0:
+                                    sleepTime = 1
+                                await asyncio.sleep(sleepTime)
+                                continue
+                            else:
+                                logging.info("PBe2: PBe1 entry filled AND stopped out! Current price=%s >= stop_loss=%s (HOD=%s). Proceeding to replay PBe1...", 
+                                           current_price, pbe1_stop_loss_price, hod)
+                                break  # Exit monitoring loop, proceed to replay PBe1
                 except Exception as e:
-                    logging.warning("PBe2: Error checking price for PBe1 stop out: %s. Retrying...", e)
+                    logging.warning("PBe2: Error checking price for PBe1 entry/stop out: %s. Retrying...", e)
                     await asyncio.sleep(1)
                     continue
         finally:
@@ -3483,8 +3670,8 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                 except Exception as e:
                     logging.debug("PBe2: Error canceling market data: %s", e)
         
-        # Step 3: PBe1 would have stopped out! Now replay PBe1 (use same logic as PBe1)
-        logging.info("PBe2: PBe1 would have stopped out. Now replaying PBe1 (using same logic as PBe1)...")
+        # Step 3: PBe1 would have stopped out! Now replay PBe1 logic (REPLAY MODE)
+        logging.info("PBe2: PBe1 would have stopped out. Now replaying PBe1 logic (REPLAY MODE - no condition check, just replay PBe1)...")
         
         # Get fresh bar data for replaying PBe1 (use same logic as PBe1)
         complete_bar_data = connection.pbe1_entry_historical_data(ibContract, timeFrame, chartTime)
@@ -3508,29 +3695,30 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
             await asyncio.sleep(1)
             continue
         
-        # PBe2: Use buySellType directly (no condition checking) - same as PBe1
+        # PBe2 REPLAY MODE: Use buySellType directly (same as PBe1, no condition checking)
         tradeType = buySellType
-        logging.info("PBe2: Using user-selected trade type %s (no condition checking) - same as PBe1", tradeType)
+        logging.info("PBe2 REPLAY MODE: Using user-selected trade type %s (no condition checking) - same as PBe1", tradeType)
         
-        # PBe2 condition is met! Place PBe2 order using sendEntryTrade (same logic as PBe1)
-        logging.info("PBe2: Replaying PBe1! tradeType=%s. Placing order using sendEntryTrade (same logic as PBe1)", tradeType)
+        # Use last_candel for entry price calculation (same as PBe1)
         histData = last_candel
+        lastPrice = last_candel.get('close', 0) if last_candel else 0
         
         # Get LOD/HOD for stop loss calculation
         lod, hod = _get_pbe1_lod_hod(connection, ibContract, timeFrame, tradeType)
         
         # Entry stop price = bar_high + 0.01 (BUY) or bar_low - 0.01 (SELL) - same as PBe1
+        # Use histData (from PBe2 condition) for entry price calculation
         entry_price = None
         if tradeType == 'BUY':
-            entry_price = round(float(last_candel.get('high', 0)) + 0.01, Config.roundVal)
+            entry_price = round(float(histData.get('high', 0)) + 0.01, Config.roundVal)
             stop_loss_price = lod  # BUY uses LOD
         else:  # SELL
-            entry_price = round(float(last_candel.get('low', 0)) - 0.01, Config.roundVal)
+            entry_price = round(float(histData.get('low', 0)) - 0.01, Config.roundVal)
             stop_loss_price = hod  # SELL uses HOD
         
         # Stop size = |bar_high/low - LOD/HOD|
-        bar_high = float(last_candel.get('high', 0))
-        bar_low = float(last_candel.get('low', 0))
+        bar_high = float(histData.get('high', 0))
+        bar_low = float(histData.get('low', 0))
         if tradeType == 'BUY':
             stop_size = abs(bar_high - lod) if lod > 0 else (bar_high - bar_low) + Config.add002
         else:  # SELL
@@ -3560,14 +3748,14 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                 quantity = 1
         logging.info(f"PBe2 quantity calculated: entry={entry_price}, stop_loss={stop_loss_price}, stop_size={stop_size}, risk={risk_amount}, quantity={quantity}")
         
-        # Place PBe2 order using sendEntryTrade (same logic as PBe1)
-        logging.info("PBe2: Placing PBe2 order using sendEntryTrade (same logic as PBe1)")
-        sendEntryTrade(connection, ibContract, tradeType, quantity, last_candel, entry_price, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage, slValue, breakEven, outsideRth)
+        # Place PBe2 order using sendEntryTrade (same logic as PBe1 - REPLAY MODE)
+        logging.info("PBe2 REPLAY MODE: Placing PBe2 order using sendEntryTrade (same logic as PBe1)")
+        sendEntryTrade(connection, ibContract, tradeType, quantity, histData, entry_price, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage, slValue, breakEven, outsideRth)
         
         # Wait a moment for StatusUpdate to complete and store order in orderStatusData
         await asyncio.sleep(0.2)
         
-        # Get the order ID from orderStatusData to start pbe1_loop_run (same as PBe1, since we're replaying PBe1)
+        # Get the order ID from orderStatusData to start pbe2_loop_run (PBe2 uses pbe2_loop_run, not pbe1_loop_run)
         entry_order = None
         logging.info(f"PBe2: Searching orderStatusData for entry order (symbol={symbol}, barType={barType})")
         for order_id, order_data in Config.orderStatusData.items():
@@ -3577,7 +3765,7 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                 order_data.get('ordType') == 'Entry' and
                 order_data.get('status') != 'Filled' and
                 order_data.get('status') != 'Cancelled'):
-                # Create a mock Order object for pbe1_loop_run (same as PBe1)
+                # Create a mock Order object for pbe2_loop_run
                 from ib_insync import Order
                 entry_order = Order()
                 entry_order.orderId = order_id
@@ -3587,21 +3775,29 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                 break
         
         if entry_order:
-            # Start pbe1_loop_run for continuous entry order updates (same as PBe1, since we're replaying PBe1)
-            logging.info("PBe2: Starting pbe1_loop_run for continuous entry order updates (replaying PBe1)")
+            # Start pbe2_loop_run for continuous entry order updates (PBe2 uses pbe2_loop_run, not pbe1_loop_run)
+            logging.info("PBe2: Starting pbe2_loop_run for continuous entry order updates")
             # Start as background task (don't await, let it run in background)
-            asyncio.ensure_future(pbe1_loop_run(connection, key, entry_order))
-            logging.info("PBe2: pbe1_loop_run scheduled as background task")
+            asyncio.ensure_future(pbe2_loop_run(connection, key, entry_order, buySellType, lastPrice))
+            logging.info("PBe2: pbe2_loop_run scheduled as background task")
         else:
-            logging.warning("PBe2: Could not find entry order in orderStatusData to start pbe1_loop_run. Available orders: %s", list(Config.orderStatusData.keys()))
+            logging.warning("PBe2: Could not find entry order in orderStatusData to start pbe2_loop_run. Available orders: %s", list(Config.orderStatusData.keys()))
         
         logging.info("PBe2 entry order done %s", symbol)
         break  # Exit main loop after placing PBe2 order
 async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
     order = entry_order
+    last_stop_size_update = datetime.datetime.now()
+    
     while True:
         try:
             await asyncio.sleep(1)
+            
+            # Update stop size and share size every 30 seconds
+            now = datetime.datetime.now()
+            if (now - last_stop_size_update).total_seconds() >= 30:
+                await _update_pbe_stop_size_and_quantity(connection, order.orderId, is_pbe1=False)
+                last_stop_size_update = now
             # for entry_key, entry_value in list(Config.rbbb_dict.items()):
             old_order = Config.orderStatusData[order.orderId]
             logging.info("old order pbe2_loop_run %s ",old_order)
@@ -3819,15 +4015,139 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
             break
         await asyncio.sleep(1)
 
+async def _update_pbe_stop_size_and_quantity(connection, order_id, is_pbe1=True):
+    """
+    Update stop size and share size for PBe1/PBe2 orders every 30 seconds.
+    Recalculates based on current LOD/HOD and updates TP/SL orders if entry is filled.
+    """
+    try:
+        old_order = Config.orderStatusData.get(order_id)
+        if old_order is None:
+            return
+        
+        # Skip if order is cancelled or inactive
+        if old_order['status'] in ['Cancelled', 'Inactive']:
+            return
+        
+        # Get current LOD/HOD
+        contract = old_order.get('contract')
+        timeFrame = old_order.get('timeFrame')
+        buySellType = old_order.get('userBuySell')
+        
+        if not contract or not timeFrame or not buySellType:
+            logging.warning(f"PBe1/PBe2: Missing required data for stop size update: contract={contract}, timeFrame={timeFrame}, buySellType={buySellType}")
+            return
+        
+        # Get current LOD/HOD
+        lod, hod = _get_pbe1_lod_hod(connection, contract, timeFrame, buySellType)
+        if lod == 0 and hod == 0:
+            logging.warning(f"PBe1/PBe2: Could not get LOD/HOD for stop size update")
+            return
+        
+        # Get current entry price (use lastPrice or current bar price)
+        entry_price = float(old_order.get('lastPrice', 0))
+        if entry_price == 0:
+            # Fallback to current bar
+            histData = old_order.get('histData', {})
+            if buySellType == 'BUY':
+                entry_price = float(histData.get('high', 0)) + 0.01
+            else:
+                entry_price = float(histData.get('low', 0)) - 0.01
+        
+        # Recalculate stop_size and stop_loss_price
+        if buySellType == 'BUY':
+            new_stop_loss_price = round(lod, Config.roundVal)
+            new_stop_size = abs(entry_price - lod) if lod > 0 else 0
+        else:  # SELL
+            new_stop_loss_price = round(hod, Config.roundVal)
+            new_stop_size = abs(entry_price - hod) if hod > 0 else 0
+        
+        new_stop_size = round(new_stop_size, Config.roundVal)
+        
+        if new_stop_size <= 0:
+            logging.warning(f"PBe1/PBe2: Invalid stop_size ({new_stop_size}), skipping update")
+            return
+        
+        # Recalculate quantity based on new stop_size
+        risk_amount = _to_float(old_order.get('risk', 0), 0)
+        if risk_amount <= 0:
+            logging.warning(f"PBe1/PBe2: Invalid risk amount ({risk_amount}), skipping quantity update")
+            return
+        
+        new_quantity = risk_amount / new_stop_size
+        new_quantity = int(math.ceil(new_quantity))  # Round UP
+        if new_quantity <= 0:
+            new_quantity = 1
+        
+        # Update stored values
+        old_quantity = old_order.get('totalQuantity', old_order.get('quantity', 0))
+        old_order['pbe1_lod'] = lod
+        old_order['pbe1_hod'] = hod
+        old_order['stopLossPrice'] = new_stop_loss_price
+        old_order['stopSize'] = new_stop_size
+        old_order['calculated_stop_size'] = new_stop_size
+        old_order['totalQuantity'] = new_quantity  # Update quantity for TP/SL orders
+        old_order['quantity'] = new_quantity  # Also update quantity field for compatibility
+        Config.orderStatusData[order_id] = old_order
+        
+        bar_type_name = "PBe1" if is_pbe1 else "PBe2"
+        logging.info(f"{bar_type_name} 30s Update: stop_size={new_stop_size} (old={old_order.get('stopSize', 'N/A')}), quantity={new_quantity} (old={old_quantity}), stop_loss={new_stop_loss_price}, LOD={lod}, HOD={hod}")
+        
+        # If entry is filled, update TP/SL orders with new quantity
+        if old_order['status'] == 'Filled':
+            # Find TP and SL orders and update their quantity
+            for tp_sl_order_id, tp_sl_order_data in Config.orderStatusData.items():
+                parent_id = tp_sl_order_data.get('parentOrderId')
+                if parent_id == order_id:
+                    ord_type = tp_sl_order_data.get('ordType')
+                    if ord_type in ['TakeProfit', 'StopLoss']:
+                        # Update quantity in TP/SL order data
+                        tp_sl_order_data['totalQuantity'] = new_quantity
+                        tp_sl_order_data['quantity'] = new_quantity
+                        tp_sl_order_data['stopSize'] = new_stop_size
+                        tp_sl_order_data['stopLossPrice'] = new_stop_loss_price
+                        tp_sl_order_data['needs_update'] = True
+                        Config.orderStatusData[tp_sl_order_id] = tp_sl_order_data
+                        logging.info(f"{bar_type_name} 30s Update: Updated {ord_type} order {tp_sl_order_id} with new quantity={new_quantity}, stop_size={new_stop_size}")
+                        
+                        # Try to update the actual order if it's still active
+                        try:
+                            if tp_sl_order_data.get('status') not in ['Filled', 'Cancelled', 'Inactive']:
+                                # Get the order from IB
+                                ib_order = connection.ib.openOrders()
+                                tp_sl_contract = tp_sl_order_data.get('contract')
+                                for ib_o in ib_order:
+                                    if ib_o.orderId == tp_sl_order_id:
+                                        # Update order quantity
+                                        ib_o.totalQuantity = new_quantity
+                                        if tp_sl_contract:
+                                            connection.ib.placeOrder(tp_sl_contract, ib_o)
+                                            logging.info(f"{bar_type_name} 30s Update: Updated {ord_type} order {tp_sl_order_id} quantity to {new_quantity} via IB")
+                                        break
+                        except Exception as e:
+                            logging.warning(f"{bar_type_name} 30s Update: Could not update {ord_type} order {tp_sl_order_id} via IB: {e}")
+    except Exception as e:
+        logging.error(f"Error updating PBe stop size and quantity: {e}")
+        logging.error(traceback.format_exc())
+
 async def pbe1_loop_run(connection, key, entry_order):
     """
     Monitor PBe1 entry order and continuously update entry stop price like RBB.
     Similar to rbb_loop_run but for PBe1 strategies with HOD/LOD stop loss.
+    Also updates stop size and share size every 30 seconds.
     """
     order = entry_order
+    last_stop_size_update = datetime.datetime.now()
+    
     while True:
         try:
             await asyncio.sleep(1)
+            
+            # Update stop size and share size every 30 seconds
+            now = datetime.datetime.now()
+            if (now - last_stop_size_update).total_seconds() >= 30:
+                await _update_pbe_stop_size_and_quantity(connection, order.orderId, is_pbe1=True)
+                last_stop_size_update = now
             old_order = Config.orderStatusData.get(order.orderId)
             if old_order is None:
                 logging.warning(f"PBe1 loop: Order {order.orderId} not found in orderStatusData")
