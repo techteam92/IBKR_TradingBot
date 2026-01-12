@@ -1,0 +1,12 @@
+[
+  {
+    "id": "1768217630859",
+    "userId": "1",
+    "timestamp": "2026-01-12T16:33:50.859603",
+    "totalBalance": 125000.5,
+    "netLiquidation": 125000.5,
+    "cashBalance": 75000.0,
+    "buyingPower": 50000.0,
+    "dailyProfit": 1250.25
+  }
+]

@@ -2824,8 +2824,8 @@ async def pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                     entry_price = float(last_candel.get('high', 0)) + 0.01
                     logging.info(f"PBe1 BUY: Setting entry stop price to bar_high + 0.01 = {entry_price} (like RBB, LOD={lod} is only for stop loss)")
                 elif tradeType == 'SELL':
-                    entry_price = float(last_candel.get('low', 0)) - 0.01
-                    logging.info(f"PBe1 SELL: Setting entry stop price to bar_low - 0.01 = {entry_price} (like RBB, HOD={hod} is only for stop loss)")
+                    entry_price = float(last_candel.get('low', 0))
+                    logging.info(f"PBe1 SELL: Setting entry stop price to bar_low = {entry_price} (prior bar low, HOD={hod} is only for stop loss)")
                 else:
                     # Safety check: if tradeType is not BUY or SELL, log error and skip
                     logging.error(f"PBe1: Invalid tradeType '{tradeType}' after validation check. Expected BUY or SELL. Skipping this iteration.")
@@ -3805,6 +3805,21 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                 sleep_time = getTimeInterval(old_order['timeFrame'], datetime.datetime.now())
                 await asyncio.sleep(sleep_time)
             old_order = Config.orderStatusData[order.orderId]
+            
+            # If order is cancelled or inactive, exit loop
+            if old_order is None or old_order['status'] in ['Cancelled', 'Inactive']:
+                if old_order:
+                    logging.info(f"PBe2 loop: Order {order.orderId} status={old_order['status']}, exiting loop")
+                break
+            
+            # If entry order is filled, continue loop for 30-second updates but skip entry order updates
+            if old_order['status'] == 'Filled':
+                # Entry order is filled - continue loop for 30-second stop size/share size updates
+                # but skip entry order price updates
+                await asyncio.sleep(1)
+                continue
+            
+            # Entry order is still active - proceed with entry order updates
             if (old_order['status'] != 'Filled' and old_order['status'] != 'Cancelled' and old_order['status'] != 'Inactive'):
                 logging.info("pbe2 stp updation start  %s %s", order.orderId , old_order['status'].upper()  )
                 chartTime = await get_first_chart_time(old_order['timeFrame'], old_order['outsideRth'])
@@ -3909,34 +3924,25 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                 lod_broken = current_bar_low < stored_lod
                 
                 if hod_broken or lod_broken:
-                    # Update HOD/LOD
+                    # IMPORTANT: When HOD/LOD breaks, we update stored LOD/HOD values
+                    # but we do NOT update the entry order price (aux_price) - it only updates on new bar
+                    # Stop size and share size will be updated by the 30-second update function
                     new_hod = max(stored_hod, current_bar_high) if hod_broken else stored_hod
                     new_lod = min(stored_lod, current_bar_low) if lod_broken else stored_lod
                     
+                    current_entry_stop = round(float(order.auxPrice), Config.roundVal)
                     logging.info(f"PBe2 HOD/LOD BREAK: current_bar_high={current_bar_high}, current_bar_low={current_bar_low}, old_HOD={stored_hod}, old_LOD={stored_lod}, new_HOD={new_hod}, new_LOD={new_lod}")
+                    logging.info(f"PBe2: Entry order price (aux_price={current_entry_stop}) NOT changed - only updates on new bar. Stop size/share size will update every 30 seconds.")
                     
-                    # Update stored values
+                    # Update stored LOD/HOD values (stop size/share size will be recalculated by 30-second update)
                     old_order = Config.orderStatusData.get(order.orderId)  # Refresh in case it was updated above
                     if old_order:
                         old_order['pbe1_lod'] = new_lod
                         old_order['pbe1_hod'] = new_hod
-                        
-                        # Recalculate stop loss price and stop size
-                        entry_price = float(old_order.get('lastPrice', order.auxPrice))
-                        if old_order['userBuySell'] == 'BUY':
-                            new_stop_loss_price = round(new_lod, Config.roundVal)
-                        else:  # SELL
-                            new_stop_loss_price = round(new_hod, Config.roundVal)
-                        
-                        new_stop_size = abs(entry_price - new_stop_loss_price)
-                        new_stop_size = round(new_stop_size, Config.roundVal)
-                        
-                        # Update stored values
-                        old_order['stopLossPrice'] = new_stop_loss_price
-                        old_order['stopSize'] = new_stop_size
                         Config.orderStatusData[order.orderId] = old_order
                         
-                        logging.info(f"PBe2: Updated stop_loss_price={new_stop_loss_price}, stop_size={new_stop_size}")
+                        # Note: Stop size and share size will be updated by _update_pbe_stop_size_and_quantity() every 30 seconds
+                        # We don't update them here to avoid conflicts with the 30-second update cycle
                 
                 # Continue with original PBe2 logic (pattern detection)
                 tradeType, row = pbe_result(buySellType, lastPrice, recentBarData, True)
@@ -4044,15 +4050,19 @@ async def _update_pbe_stop_size_and_quantity(connection, order_id, is_pbe1=True)
             logging.warning(f"PBe1/PBe2: Could not get LOD/HOD for stop size update")
             return
         
-        # Get current entry price (use lastPrice or current bar price)
+        # Get current entry price (use lastPrice - this is the entry stop price, which should NOT change when LOD/HOD changes)
+        # Entry order price only updates on new bar, not when LOD/HOD changes
         entry_price = float(old_order.get('lastPrice', 0))
         if entry_price == 0:
-            # Fallback to current bar
+            # Fallback to current bar (should rarely happen)
             histData = old_order.get('histData', {})
             if buySellType == 'BUY':
                 entry_price = float(histData.get('high', 0)) + 0.01
             else:
-                entry_price = float(histData.get('low', 0)) - 0.01
+                entry_price = float(histData.get('low', 0))  # SELL: prior bar low (no -0.01)
+        
+        # IMPORTANT: entry_price (lastPrice) should NOT be updated here - it only updates on new bar
+        # We use the current entry_price to recalculate stop_size based on current LOD/HOD
         
         # Recalculate stop_size and stop_loss_price
         if buySellType == 'BUY':
@@ -4120,9 +4130,22 @@ async def _update_pbe_stop_size_and_quantity(connection, order_id, is_pbe1=True)
                                     if ib_o.orderId == tp_sl_order_id:
                                         # Update order quantity
                                         ib_o.totalQuantity = new_quantity
+                                        
+                                        # Update stop loss price (auxPrice) if it's a stop loss order and price changed
+                                        stop_price_updated = False
+                                        if ord_type == 'StopLoss':
+                                            old_stop_price = tp_sl_order_data.get('stopLossPrice', 0)
+                                            if old_stop_price != new_stop_loss_price:
+                                                ib_o.auxPrice = new_stop_loss_price
+                                                stop_price_updated = True
+                                                logging.info(f"{bar_type_name} 30s Update: Updating {ord_type} order {tp_sl_order_id} stop price from {old_stop_price} to {new_stop_loss_price} (HOD/LOD changed)")
+                                        
                                         if tp_sl_contract:
                                             connection.ib.placeOrder(tp_sl_contract, ib_o)
-                                            logging.info(f"{bar_type_name} 30s Update: Updated {ord_type} order {tp_sl_order_id} quantity to {new_quantity} via IB")
+                                            if stop_price_updated:
+                                                logging.info(f"{bar_type_name} 30s Update: Updated {ord_type} order {tp_sl_order_id} - quantity={new_quantity}, stop_price={new_stop_loss_price} via IB")
+                                            else:
+                                                logging.info(f"{bar_type_name} 30s Update: Updated {ord_type} order {tp_sl_order_id} quantity to {new_quantity} via IB")
                                         break
                         except Exception as e:
                             logging.warning(f"{bar_type_name} 30s Update: Could not update {ord_type} order {tp_sl_order_id} via IB: {e}")
@@ -4153,6 +4176,19 @@ async def pbe1_loop_run(connection, key, entry_order):
                 logging.warning(f"PBe1 loop: Order {order.orderId} not found in orderStatusData")
                 break
             
+            # If order is cancelled or inactive, exit loop
+            if old_order['status'] in ['Cancelled', 'Inactive']:
+                logging.info(f"PBe1 loop: Order {order.orderId} status={old_order['status']}, exiting loop")
+                break
+            
+            # If entry order is filled, continue loop for 30-second updates but skip entry order updates
+            if old_order['status'] == 'Filled':
+                # Entry order is filled - continue loop for 30-second stop size/share size updates
+                # but skip entry order price updates
+                await asyncio.sleep(1)
+                continue
+            
+            # Entry order is still active - proceed with entry order updates
             if (old_order['status'] != 'Filled' and old_order['status'] != 'Cancelled' and old_order['status'] != 'Inactive'):
                 logging.info(f"PBe1 loop: Monitoring order {order.orderId}, status={old_order['status']}")
                 
@@ -4325,8 +4361,8 @@ async def pbe1_loop_run(connection, key, entry_order):
                     aux_price = round(float(histData['high']) + 0.01, Config.roundVal)
                     logging.info("PBe1 auxprice high for %s (new bar high=%s) - like RBB", aux_price, histData['high'])
                 else:  # SELL
-                    aux_price = round(float(histData['low']) - 0.01, Config.roundVal)
-                    logging.info("PBe1 auxprice low for %s (new bar low=%s) - like RBB", aux_price, histData['low'])
+                    aux_price = round(float(histData['low']), Config.roundVal)
+                    logging.info("PBe1 auxprice low for %s (new bar low=%s) - prior bar low", aux_price, histData['low'])
                 
                 # Get stored LOD/HOD for stop_size calculation
                 stored_lod = old_order.get('pbe1_lod', 0)
@@ -4438,49 +4474,24 @@ async def pbe1_loop_run(connection, key, entry_order):
                 lod_broken = current_bar_low < stored_lod
                 
                 if hod_broken or lod_broken:
-                    # Update HOD/LOD
+                    # IMPORTANT: When HOD/LOD breaks, we update stored LOD/HOD values
+                    # but we do NOT update the entry order price (aux_price) - it only updates on new bar
+                    # Stop size and share size will be updated by the 30-second update function
                     new_hod = max(stored_hod, current_bar_high) if hod_broken else stored_hod
                     new_lod = min(stored_lod, current_bar_low) if lod_broken else stored_lod
                     
                     logging.info(f"PBe1 HOD/LOD BREAK: current_bar_high={current_bar_high}, current_bar_low={current_bar_low}, old_HOD={stored_hod}, old_LOD={stored_lod}, new_HOD={new_hod}, new_LOD={new_lod}")
+                    logging.info(f"PBe1: Entry order price (aux_price={aux_price}) NOT changed - only updates on new bar. Stop size/share size will update every 30 seconds.")
                     
-                    # Update stored values
+                    # Update stored LOD/HOD values (stop size/share size will be recalculated by 30-second update)
                     old_order = Config.orderStatusData.get(order.orderId)  # Refresh
                     if old_order:
                         old_order['pbe1_lod'] = new_lod
                         old_order['pbe1_hod'] = new_hod
-                        
-                        # Recalculate stop loss price and stop size
-                        entry_price = float(old_order.get('lastPrice', aux_price))
-                        if old_order['userBuySell'] == 'BUY':
-                            new_stop_loss_price = round(new_lod, Config.roundVal)
-                        else:  # SELL
-                            new_stop_loss_price = round(new_hod, Config.roundVal)
-                        
-                        new_stop_size = abs(entry_price - new_stop_loss_price)
-                        new_stop_size = round(new_stop_size, Config.roundVal)
-                        
-                        # Update stored values
-                        old_order['stopLossPrice'] = new_stop_loss_price
-                        old_order['stopSize'] = new_stop_size
-                        old_order['calculated_stop_size'] = new_stop_size
                         Config.orderStatusData[order.orderId] = old_order
                         
-                        logging.info(f"PBe1: Updated stop_loss_price={new_stop_loss_price}, stop_size={new_stop_size}")
-                        
-                        # If entry is filled, update the stop loss order
-                        if old_order['status'] == 'Filled':
-                            # Find and update the stop loss order
-                            for sl_order_id, sl_order_data in Config.orderStatusData.items():
-                                if (sl_order_data.get('parentOrderId') == order.orderId and 
-                                    sl_order_data.get('ordType') == 'StopLoss'):
-                                    logging.info(f"PBe1: Stop loss order {sl_order_id} needs update to new stop price {new_stop_loss_price}")
-                                    # The stop loss order will be updated when sendStopLoss is called again
-                                    break
-            else:
-                # Entry order is filled, cancelled, or inactive - exit loop
-                logging.info(f"PBe1 loop: Order {order.orderId} status={old_order['status']}, exiting loop")
-                break
+                        # Note: Stop size and share size will be updated by _update_pbe_stop_size_and_quantity() every 30 seconds
+                        # We don't update them here to avoid conflicts with the 30-second update cycle
                 
         except Exception as e:
             logging.error(f"PBe1 loop error: {e}")
@@ -5297,12 +5308,12 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
             # Get LOD/HOD for stop loss calculation (use same function as pull_back_PBe1 for consistency)
             lod, hod = _get_pbe1_lod_hod(connection, ibcontract, timeFrame, tradeType)
             
-            # Entry stop price = bar_high + 0.01 (BUY) or bar_low - 0.01 (SELL)
+            # Entry stop price = bar_high + 0.01 (BUY) or bar_low (SELL) - prior bar low for SELL
             if tradeType == 'BUY':
                 entry_stop_price = round(bar_high + 0.01, Config.roundVal)
                 stop_loss_price = lod  # BUY uses LOD
             else:  # SELL
-                entry_stop_price = round(bar_low - 0.01, Config.roundVal)
+                entry_stop_price = round(bar_low, Config.roundVal)
                 stop_loss_price = hod  # SELL uses HOD
             
             # Stop size = |bar_high/low - HOD/LOD| (same as pull_back_PBe1, using bar high/low, not entry_stop_price)
