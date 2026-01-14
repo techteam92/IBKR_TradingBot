@@ -30,11 +30,22 @@ pyinstaller ^
     --hidden-import=nest_asyncio ^
     --hidden-import=numpy ^
     --hidden-import=talib ^
+    --hidden-import=talib.stream ^
     --hidden-import=pandas ^
     --hidden-import=tkinter ^
     --hidden-import=asyncio ^
     --hidden-import=datetime ^
     --hidden-import=logging ^
+    --exclude-module=flask ^
+    --exclude-module=flask_sqlalchemy ^
+    --exclude-module=flask_cors ^
+    --exclude-module=werkzeug ^
+    --exclude-module=sqlalchemy ^
+    --exclude-module=jinja2 ^
+    --exclude-module=markupsafe ^
+    --exclude-module=itsdangerous ^
+    --exclude-module=click ^
+    --exclude-module=blinker ^
     --collect-all ib_insync ^
     --collect-all talib ^
     app.py

@@ -430,62 +430,6 @@ def NewTradeFrame(frame,connection):
     global IbConn
     IbConn = connection
     asyncio.ensure_future(pnl_check(IbConn))
-    labelFrame = Frame(scrollable_frame)
-    header_labels = ["Symbol", "Time Frame", "Profit", "Stop Loss", "Break Even",
-                     "Time In Force", "Trade Type", "Buy/Sell", "Risk", "Replay", "Status", "Cancel"]
-    for col in range(len(header_labels)):
-        labelFrame.columnconfigure(col, weight=1, uniform="header")
-    lblSymbol = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Symbol", justify=LEFT)
-    lblSymbol.grid(row=0, column=0, sticky="ew", padx=5)
-
-    timeFramelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Time Frame", justify=LEFT)
-    timeFramelbl.grid(row=0, column=1, sticky="ew", padx=5)
-
-    profitlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Profit", justify=LEFT)
-    profitlbl.grid(row=0, column=2, sticky="ew", padx=5)
-
-    stpLosslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Stop Loss", justify=LEFT)
-    stpLosslbl.grid(row=0, column=3, sticky="ew", padx=5)
-
-    # stpLossValuelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="SL Value", justify=LEFT)
-    # stpLossValuelbl.config(width=10)
-    # stpLossValuelbl.pack(side=LEFT)
-
-    breakEvenlbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Break Even", justify=LEFT)
-    breakEvenlbl.grid(row=0, column=4, sticky="ew", padx=5)
-
-    timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Time In Force", justify=LEFT)
-    timeInForcelbl.grid(row=0, column=5, sticky="ew", padx=5)
-
-    timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Trade Type", justify=LEFT)
-    timeInForcelbl.grid(row=0, column=6, sticky="ew", padx=5)
-
-    # Entry Point label is hidden since the field is now modal-based
-    # timeInForcelbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Entry Point", justify=LEFT)
-    # timeInForcelbl.config(width=10)
-    # timeInForcelbl.pack(side=LEFT)
-
-    buySelllbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Buy/Sell", justify=LEFT)
-    buySelllbl.grid(row=0, column=7, sticky="ew", padx=5)
-
-    risklbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Risk", justify=LEFT)
-    risklbl.grid(row=0, column=8, sticky="ew", padx=5)
-
-    # risklbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Quantity", justify=LEFT)
-    # risklbl.config(width=9)
-    # risklbl.pack(side=LEFT)
-
-    replaylbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Replay", justify=LEFT)
-    replaylbl.grid(row=0, column=9, sticky="ew", padx=5)
-
-    statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
-    statuslbl.grid(row=0, column=10, sticky="ew", padx=5)
-
-    statuslbl = Label(labelFrame, font=(Config.fontName2, Config.fontSize2), text="Cancel", justify=LEFT)
-    statuslbl.grid(row=0, column=11, sticky="ew", padx=5)
-
-
-    labelFrame.pack(fill=X, padx=10, pady=5)
 
     addOldCache()
     addField(0, "")
@@ -736,32 +680,69 @@ def addField(rowYPosition, initial_status_text=""):
     logging.info("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
-    for col in range(12):
+    # Configure 11 columns for the new order and 2 rows (labels + fields)
+    for col in range(11):
         field.columnconfigure(col, weight=1, uniform="row")
+    for row in range(2):
+        field.rowconfigure(row, weight=1)
+    
+    # Labels row (row 0)
+    # 1) SYMBOL label
+    symbolLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Symbol", justify=LEFT)
+    symbolLbl.grid(row=0, column=0, sticky="ew", padx=5, pady=3)
+    
+    # 2) STOP LOSS label
+    stopLossLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Stop Loss", justify=LEFT)
+    stopLossLbl.grid(row=0, column=1, sticky="ew", padx=5, pady=3)
+    
+    # 3) TRADE TYPE label
+    tradeTypeLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Trade Type", justify=LEFT)
+    tradeTypeLbl.grid(row=0, column=2, sticky="ew", padx=5, pady=3)
+    
+    # 4) BUY / SELL label
+    buySellLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Buy/Sell", justify=LEFT)
+    buySellLbl.grid(row=0, column=3, sticky="ew", padx=5, pady=3)
+    
+    # 5) EXECUTE label (button text is already "Execute", but adding label for consistency)
+    executeLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Execute", justify=LEFT)
+    executeLbl.grid(row=0, column=4, sticky="ew", padx=5, pady=3)
+    
+    # 6) RISK label
+    riskLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Risk", justify=LEFT)
+    riskLbl.grid(row=0, column=5, sticky="ew", padx=5, pady=3)
+    
+    # 7) PROFIT label
+    profitLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Profit", justify=LEFT)
+    profitLbl.grid(row=0, column=6, sticky="ew", padx=5, pady=3)
+    
+    # 8) TIME FRAME label
+    timeFrameLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Time Frame", justify=LEFT)
+    timeFrameLbl.grid(row=0, column=7, sticky="ew", padx=5, pady=3)
+    
+    # 9) REPLAY label
+    replayLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Replay", justify=LEFT)
+    replayLbl.grid(row=0, column=8, sticky="ew", padx=5, pady=3)
+    
+    # 10) BREAK EVEN label
+    breakEvenLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Break Even", justify=LEFT)
+    breakEvenLbl.grid(row=0, column=9, sticky="ew", padx=5, pady=3)
+    
+    # 11) STATUS label
+    statusLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
+    statusLbl.grid(row=0, column=10, sticky="ew", padx=5, pady=3)
+    
+    # Fields row (row 1)
+    # 1) SYMBOL (column 0)
     firstEntry = Entry(field, width="10", textvariable=StringVar(field))
-
     firstEntry.config(width=10)
-    firstEntry.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
+    firstEntry.grid(row=1, column=0, sticky="ew", padx=5, pady=3)
     setDefaultSymbol(firstEntry)
     symbol.append(firstEntry)
 
-    secEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeFrame)
-    secEntry.config(width=10)
-    secEntry.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
-    secEntry.current(0)
-    setDefaultTimeFrame(secEntry)
-    timeFrame.append(secEntry)
-
-    profitEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.takeProfit)
-    profitEntry.config(width=10)
-    profitEntry.grid(row=0, column=2, sticky="ew", padx=5, pady=2)
-    profitEntry.current(0)
-    setDefaultProfit(profitEntry)
-    takeProfit.append(profitEntry)
-
+    # 2) STOP LOSS (column 1)
     stpLossEntry = ttk.Combobox(field, state="readonly", width="15", value=Config.stopLoss)
     stpLossEntry.config(width=15)
-    stpLossEntry.grid(row=0, column=3, sticky="ew", padx=5, pady=2)
+    stpLossEntry.grid(row=1, column=1, sticky="ew", padx=5, pady=3)
     stpLossEntry.current(0)
     setDefaultStp(stpLossEntry)
     stopLoss.append(stpLossEntry)
@@ -769,7 +750,7 @@ def addField(rowYPosition, initial_status_text=""):
     # Hidden entry field to store custom stop loss value (not displayed in UI)
     stopLossValueEntry = Entry(field, width="0", textvariable=StringVar(field))
     stopLossValueEntry.config(width=0)
-    stopLossValueEntry.grid(row=0, column=3, padx=0, pady=0)
+    stopLossValueEntry.grid(row=1, column=1, padx=0, pady=0)
     stopLossValueEntry.grid_remove()  # Hide it completely
     setDefaultstopLossValue(stopLossValueEntry)
     stopLossValue.append(stopLossValueEntry)
@@ -794,25 +775,10 @@ def addField(rowYPosition, initial_status_text=""):
     
     stpLossEntry.bind("<<ComboboxSelected>>", on_stop_loss_change)
 
-    breakEvenEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.breakEven)
-    breakEvenEntry.config(width=10)
-    breakEvenEntry.grid(row=0, column=4, sticky="ew", padx=5, pady=2)
-    breakEvenEntry.current(0)
-    setDefaultbreakEvenEntryType(breakEvenEntry)
-    breakEven.append(breakEvenEntry)
-
-
-    timeForceEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeInForce)
-    timeForceEntry.config(width=10)
-    timeForceEntry.grid(row=0, column=5, sticky="ew", padx=5, pady=2)
-    timeForceEntry.current(0)
-    setDefaultTif(timeForceEntry)
-    timeInForce.append(timeForceEntry)
-
-
+    # 3) TRADE TYPE (column 2)
     tradeTypeEntry = ttk.Combobox(field, state="readonly", width="18", value=Config.entryTradeType)
     tradeTypeEntry.config(width=18)
-    tradeTypeEntry.grid(row=0, column=6, sticky="ew", padx=5, pady=2)
+    tradeTypeEntry.grid(row=1, column=2, sticky="ew", padx=5, pady=3)
     tradeTypeEntry.current(0)
     setDefaultEntryType(tradeTypeEntry)
     tradeType.append(tradeTypeEntry)
@@ -820,7 +786,7 @@ def addField(rowYPosition, initial_status_text=""):
     # Hidden entry field to store entry price value (not displayed in UI)
     entry_pointValueEntry = Entry(field, width="0", textvariable=StringVar(field))
     entry_pointValueEntry.config(width=0)
-    entry_pointValueEntry.grid(row=0, column=6, padx=0, pady=0)
+    entry_pointValueEntry.grid(row=1, column=2, padx=0, pady=0)
     entry_pointValueEntry.grid_remove()  # Hide it completely
     setDefaultEntryPointValue(entry_pointValueEntry)
     entry_points.append(entry_pointValueEntry)
@@ -864,64 +830,85 @@ def addField(rowYPosition, initial_status_text=""):
     
     tradeTypeEntry.bind("<<ComboboxSelected>>", on_trade_type_change)
 
+    # 4) BUY / SELL (column 3)
     buysellEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.buySell)
     buysellEntry.config(width=10)
-    buysellEntry.grid(row=0, column=7, sticky="ew", padx=5, pady=2)
+    buysellEntry.grid(row=1, column=3, sticky="ew", padx=5, pady=3)
     buysellEntry.current(0)
     setDefaultBuySell(buysellEntry)
     buySell.append(buysellEntry)
 
+    # 5) EXECUTE (column 4)
+    row_index = len(symbol) - 1
+    if len(row_async_tasks) <= row_index:
+        row_async_tasks.append(None)
 
+    but = Button(field, width="10", height="1", text="Execute")
+    but['command'] = lambda idx=row_index: execute_row(idx)
+    but.grid(row=1, column=4, sticky="ew", padx=5, pady=3)
+    cancelButton.append(but)
 
+    # 6) RISK (column 5)
     riskEntry = Entry(field, width="10", textvariable=StringVar(field))
     riskEntry.config(width=10)
-    riskEntry.grid(row=0, column=8, sticky="ew", padx=5, pady=2)
+    riskEntry.grid(row=1, column=5, sticky="ew", padx=5, pady=3)
     setDefaultRisk(riskEntry)
     risk.append(riskEntry)
 
-    # quantityEntry = Entry(field, width="10", textvariable=StringVar(field))
-    # quantityEntry.config(width=10)
-    # quantityEntry.pack(side=LEFT, padx=9)
-    # setDefaultQuantity(quantityEntry)
-    # quantity.append(quantityEntry)
+    # 7) PROFIT (column 6)
+    profitEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.takeProfit)
+    profitEntry.config(width=10)
+    profitEntry.grid(row=1, column=6, sticky="ew", padx=5, pady=3)
+    profitEntry.current(0)
+    setDefaultProfit(profitEntry)
+    takeProfit.append(profitEntry)
 
-    # Replay button
+    # 8) TIME FRAME (column 7)
+    secEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeFrame)
+    secEntry.config(width=10)
+    secEntry.grid(row=1, column=7, sticky="ew", padx=5, pady=3)
+    secEntry.current(0)
+    setDefaultTimeFrame(secEntry)
+    timeFrame.append(secEntry)
+
+    # 9) REPLAY (column 8)
     row_index_for_replay = len(symbol) - 1
     replayButton = Button(field, width="10", height="1", text="Replay", bg='#D3D3D3')
-    replayButton.grid(row=0, column=9, sticky="ew", padx=5, pady=2)
+    replayButton.grid(row=1, column=8, sticky="ew", padx=5, pady=3)
     replayEnabled.append(False)  # Initialize replay as disabled
     replayButtonList.append(replayButton)  # Store button reference
     replayButton['command'] = lambda idx=row_index_for_replay: toggle_replay(idx)
 
+    # 10) BREAK EVEN (column 9)
+    breakEvenEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.breakEven)
+    breakEvenEntry.config(width=10)
+    breakEvenEntry.grid(row=1, column=9, sticky="ew", padx=5, pady=3)
+    breakEvenEntry.current(0)
+    setDefaultbreakEvenEntryType(breakEvenEntry)
+    breakEven.append(breakEvenEntry)
+
+    # 11) STATUS (column 10)
     statusVar = StringVar(field)
     statusEntry = Entry(field, width="9", textvariable=statusVar)
     statusEntry.config(width=9)
-    statusEntry.grid(row=0, column=10, sticky="ew", padx=5, pady=2)
+    statusEntry.grid(row=1, column=10, sticky="ew", padx=5, pady=3)
     status.append(statusEntry)
     _set_status(len(status) - 1, initial_status_text)
+
+    # Time In Force - hidden but still functional (needed for trading logic)
+    timeForceEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeInForce)
+    timeForceEntry.config(width=10)
+    timeForceEntry.grid(row=1, column=10, padx=0, pady=0)
+    timeForceEntry.grid_remove()  # Hide it but keep it functional
+    timeForceEntry.current(0)
+    setDefaultTif(timeForceEntry)
+    timeInForce.append(timeForceEntry)
 
     # ATR % field removed - functionality removed
     # Create a hidden entry with default value to maintain compatibility
     atrVar = StringVar(field, "0")
     atrEntry = Entry(field, width="0")  # Hidden entry
     atr.append(atrEntry)
-
-    # outsideRTHEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.prePostBool)
-    # outsideRTHEntry.config(width=10)
-    # outsideRTHEntry.pack(side=LEFT, padx=9)
-    # outsideRTHEntry.current(0)
-    # setDefaultoutsideRTH(outsideRTHEntry)
-    # outsideRTH.append(outsideRTHEntry)
-
-    row_index = len(symbol) - 1
-    if len(row_async_tasks) <= row_index:
-        row_async_tasks.append(None)
-
-    butCancle = Frame(field)
-    but = Button(field, width="10", height="1", text="Execute")
-    but['command'] = lambda idx=row_index: execute_row(idx)
-    but.grid(row=0, column=11, sticky="ew", padx=5, pady=2)
-    cancelButton.append(but)
 
 
     field.pack(side=TOP, pady=8, fill=X, expand=True)
@@ -1056,5 +1043,3 @@ def setDefaultAtr(atr):
     if Config.defaultValue.get("atr") != None:
         atr.delete(0, END)
         atr.insert(0, Config.defaultValue.get("atr"))
-
-

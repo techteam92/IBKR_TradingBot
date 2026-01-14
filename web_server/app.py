@@ -7,14 +7,22 @@ from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, timedelta
-import jwt
+from datetime import datetime, timedelta, timezone
 import os
+
+# Import PyJWT - ensure PyJWT is installed, not the 'jwt' package
+try:
+    import jwt
+    # Verify it's PyJWT by checking for decode method
+    if not hasattr(jwt, 'decode'):
+        raise ImportError("Wrong JWT package installed. Please uninstall 'jwt' and install 'PyJWT': pip uninstall jwt && pip install PyJWT")
+except ImportError as e:
+    raise ImportError("PyJWT is required. Install it with: pip install PyJWT") from e
 import subprocess
 import platform
 from functools import wraps
 from balance_history import get_balance_history, save_balance_snapshot
-from bot_data_helper import get_account_summary, get_open_positions, get_daily_profit
+from bot_data_helper import get_account_summary, get_open_positions, get_daily_profit, place_order
 
 app = Flask(__name__)
 
@@ -47,7 +55,7 @@ class User(db.Model):
     name = db.Column(db.String(80), unique=True, nullable=False, index=True)
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     last_login = db.Column(db.DateTime, nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     
@@ -68,8 +76,8 @@ def generate_token(user_id):
     """Generate JWT token for user"""
     payload = {
         'user_id': user_id,
-        'exp': datetime.utcnow() + app.config['JWT_EXPIRATION_DELTA'],
-        'iat': datetime.utcnow()
+        'exp': datetime.now(timezone.utc) + app.config['JWT_EXPIRATION_DELTA'],
+        'iat': datetime.now(timezone.utc)
     }
     return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
 
@@ -220,7 +228,7 @@ def login():
             return jsonify({'error': 'Invalid email/name or password'}), 401
         
         # Update last login
-        user.last_login = datetime.utcnow()
+        user.last_login = datetime.now(timezone.utc)
         db.session.commit()
         
         # Generate token
@@ -388,198 +396,6 @@ def bot_status_endpoint(user):
     }), 200
 
 
-@app.route('/api/bot/start', methods=['POST'])
-@token_required
-def bot_start(user):
-    """Start the bot process (idempotent - if already running, return success)"""
-    global bot_process, bot_status
-    
-    print("=" * 50)
-    print("DEBUG: /api/bot/start endpoint called")
-    
-    # Check current status first
-    if bot_process:
-        if bot_process.poll() is None:
-            # Process is running
-            print(f"DEBUG: Bot already running (PID: {bot_process.pid})")
-            return jsonify({
-                'message': 'Bot is already running',
-                'isRunning': True,
-                'pid': bot_process.pid,
-                'startTime': bot_status.get('startTime'),
-                'startedByWeb': bot_status.get('startedByWeb', False),
-            }), 200
-        else:
-            # Process ended, clean up
-            bot_process = None
-            bot_status['isRunning'] = False
-    
-    # Check if bot is running manually (by checking if app.py process exists)
-    try:
-        if platform.system() == 'Windows':
-            # Check for python processes running app.py
-            result = subprocess.run(
-                ['tasklist', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            # This is a simple check - in production you might want more sophisticated detection
-        else:
-            # On Unix, check for python processes
-            result = subprocess.run(
-                ['pgrep', '-f', 'app.py'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                # Bot is running manually
-                pids = result.stdout.strip().split('\n')
-                if pids and pids[0]:
-                    manual_pid = int(pids[0])
-                    print(f"DEBUG: Detected manually started bot (PID: {manual_pid})")
-                    bot_status['isRunning'] = True
-                    bot_status['pid'] = manual_pid
-                    bot_status['startedByWeb'] = False
-                    return jsonify({
-                        'message': 'Bot is already running (started manually)',
-                        'isRunning': True,
-                        'pid': manual_pid,
-                        'startTime': bot_status.get('startTime'),
-                        'startedByWeb': False,
-                    }), 200
-    except Exception as e:
-        print(f"DEBUG: Could not check for manually started bot: {e}")
-    
-    # Bot is not running, start it
-    try:
-        data = request.get_json() or {}
-        bot_path = os.environ.get('BOT_PATH') or data.get('botPath') or 'app.py'
-        python_cmd = os.environ.get('PYTHON_CMD') or data.get('pythonCmd') or 'python'
-        bot_dir = os.environ.get('BOT_DIR') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
-        print(f"DEBUG: Starting bot - path: {bot_path}, cmd: {python_cmd}, dir: {bot_dir}")
-        
-        # Start the Python bot
-        bot_process = subprocess.Popen(
-            [python_cmd, bot_path],
-            cwd=bot_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        bot_status['isRunning'] = True
-        bot_status['startTime'] = datetime.utcnow().isoformat()
-        bot_status['pid'] = bot_process.pid
-        bot_status['startedByWeb'] = True
-        
-        print(f"DEBUG: Bot started successfully (PID: {bot_process.pid})")
-        print("=" * 50)
-        
-        return jsonify({
-            'message': 'Bot started successfully',
-            'isRunning': True,
-            'pid': bot_process.pid,
-            'startTime': bot_status['startTime'],
-            'startedByWeb': True,
-        }), 200
-        
-    except Exception as e:
-        print(f"ERROR: Failed to start bot: {e}")
-        import traceback
-        print(f"ERROR: Traceback:\n{traceback.format_exc()}")
-        bot_status['isRunning'] = False
-        bot_process = None
-        return jsonify({
-            'error': f'Failed to start bot: {str(e)}',
-            'isRunning': False
-        }), 500
-
-
-@app.route('/api/bot/stop', methods=['POST'])
-@token_required
-def bot_stop(user):
-    """Stop the bot process"""
-    global bot_process, bot_status
-    
-    print("=" * 50)
-    print("DEBUG: /api/bot/stop endpoint called")
-    print(f"DEBUG: bot_status: {bot_status}")
-    print(f"DEBUG: bot_process: {bot_process}")
-    
-    # Check if bot is running
-    is_running = False
-    pid_to_stop = None
-    
-    if bot_process:
-        if bot_process.poll() is None:
-            # Web-started process is running
-            is_running = True
-            pid_to_stop = bot_process.pid
-            print(f"DEBUG: Stopping web-started bot (PID: {pid_to_stop})")
-        else:
-            # Process already ended
-            bot_process = None
-            bot_status['isRunning'] = False
-    elif bot_status.get('pid') and check_bot_process_running(bot_status['pid']):
-        # Manually started bot is running
-        is_running = True
-        pid_to_stop = bot_status['pid']
-        print(f"DEBUG: Stopping manually started bot (PID: {pid_to_stop})")
-    
-    if not is_running:
-        print("DEBUG: Bot is not running")
-        return jsonify({
-            'message': 'Bot is not running',
-            'isRunning': False
-        }), 200  # Return 200 (success) instead of 400, since stopping a stopped bot is idempotent
-    
-    try:
-        # Kill the bot process
-        if platform.system() == 'Windows':
-            print(f"DEBUG: Using taskkill to stop PID {pid_to_stop}")
-            result = subprocess.run(
-                ['taskkill', '/pid', str(pid_to_stop), '/f', '/t'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            print(f"DEBUG: taskkill result: {result.returncode}, stdout: {result.stdout}, stderr: {result.stderr}")
-        else:
-            print(f"DEBUG: Using terminate() to stop PID {pid_to_stop}")
-            if bot_process:
-                bot_process.terminate()
-                bot_process.wait(timeout=5)
-            else:
-                os.kill(pid_to_stop, 15)  # SIGTERM
-        
-        # Clean up status
-        bot_status['isRunning'] = False
-        bot_status['startTime'] = None
-        bot_status['pid'] = None
-        bot_status['startedByWeb'] = False
-        bot_process = None
-        
-        print("DEBUG: Bot stopped successfully")
-        print("=" * 50)
-        
-        return jsonify({
-            'message': 'Bot stopped successfully',
-            'isRunning': False,
-        }), 200
-        
-    except Exception as e:
-        print(f"ERROR: Failed to stop bot: {e}")
-        import traceback
-        print(f"ERROR: Traceback:\n{traceback.format_exc()}")
-        return jsonify({
-            'error': f'Failed to stop bot: {str(e)}',
-            'isRunning': bot_status['isRunning']
-        }), 500
-
-
 # Account data routes (protected)
 @app.route('/api/account/summary', methods=['GET'])
 @token_required
@@ -679,29 +495,25 @@ def account_balance_history(user):
 def account_positions(user):
     """Get open positions"""
     print("=" * 50)
-    print("DEBUG: /api/account/positions endpoint called")
+    print("DEBUG: /api/bot/open-position endpoint called (POST)")
     print(f"DEBUG: User: {user.email if user else 'None'}")
-    
+
     try:
-        # Get real positions from bot
-        print("DEBUG: Calling get_open_positions()...")
-        positions = get_open_positions()
-        print(f"DEBUG: get_open_positions() returned: {positions}")
-        
-        if positions is None:
-            print("WARNING: positions is None, returning empty list")
-            # Return empty list instead of 503 error so frontend doesn't break
-            return jsonify({
-                'positions': [],
-                'connected': False,
-                'warning': 'Bot not connected. Showing empty positions. Make sure TWS is running and bot is connected.'
-            }), 200
-        
-        print(f"DEBUG: Returning {len(positions)} positions")
-        print("=" * 50)
+        # JSON body from UI
+        data = request.get_json(silent=True) or {}
+        print(f"DEBUG: Received body: {data}")
+
+        # Example fields
+        symbol = data.get('symbol')
+        time_frame = data.get('timeFrame')
+
+        # TODO: use symbol / time_frame to filter positions or trigger logic
+        # positions = get_open_positions_filtered(symbol, time_frame)
+
         return jsonify({
-            'positions': positions,
-            'connected': True
+            "ok": True,
+            "received": data,
+            # "positions": positions,
         }), 200
         
     except Exception as e:
@@ -710,6 +522,85 @@ def account_positions(user):
         import traceback
         print(f"ERROR: Traceback:\n{traceback.format_exc()}")
         return jsonify({'error': f'Failed to fetch positions: {str(e)}'}), 500
+
+
+@app.route('/api/bot/open-position', methods=['POST'])
+@token_required
+def bot_open_position(user):
+    """
+    Get bot open positions.
+    This is a bot-focused alias of /api/account/positions.
+    """
+    print("=" * 50)
+    print("DEBUG: /api/bot/open-position endpoint called (POST)")
+    print(f"DEBUG: User: {user.email if user else 'None'}")
+    
+    try:
+        # Get request body if any
+        data = request.get_json(silent=True) or {}
+        print(f"DEBUG: Received request body: {data}")
+        
+        # Reuse the same data source as account_positions
+        print("DEBUG: Calling get_open_positions() from bot_open_position...")
+        positions = get_open_positions()
+        print(f"DEBUG: get_open_positions() returned: {positions}")
+        
+        if positions is None:
+            print("WARNING: positions is None, returning empty list from bot_open_position")
+            return jsonify({
+                'positions': positions,
+                'connected': False,
+                'warning': 'Bot not connected. Showing empty positions. Make sure TWS is running and bot is connected.'
+            }), 200
+        
+        print(f"DEBUG: Returning {len(positions)} positions from bot_open_position")
+        print("=" * 50)
+        return jsonify({
+            'positions': data,
+            'connected': True
+        }), 200
+        
+    except Exception as e:
+        print(f"ERROR: Exception in bot_open_position endpoint: {e}")
+        print(f"ERROR: Exception type: {type(e)}")
+        import traceback
+        print(f"ERROR: Traceback:\n{traceback.format_exc()}")
+        return jsonify({'error': f'Failed to fetch bot open positions: {str(e)}'}), 500
+
+
+@app.route('/api/bot/place-order', methods=['POST'])
+@token_required
+def bot_place_order(user):
+    
+    print("=" * 50)
+    print("DEBUG: /api/bot/place-order endpoint called (POST)")
+    print(f"DEBUG: User: {user.email if user else 'None'}")
+    
+    try:
+        # Get request body
+        data = request.get_json(silent=True) or {}
+        print(f"DEBUG: Received order data: {data}")
+        
+        if not data:
+            return jsonify({'success': False, 'error': 'No order data provided'}), 400
+        
+        # Place the order
+        result = place_order(data)
+        
+        if result and result.get('success'):
+            print(f"DEBUG: Order placed successfully: {result}")
+            return jsonify(result), 200
+        else:
+            error_msg = result.get('error', 'Unknown error') if result else 'Failed to place order'
+            print(f"ERROR: Order placement failed: {error_msg}")
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+    except Exception as e:
+        print(f"ERROR: Exception in bot_place_order endpoint: {e}")
+        print(f"ERROR: Exception type: {type(e)}")
+        import traceback
+        print(f"ERROR: Traceback:\n{traceback.format_exc()}")
+        return jsonify({'success': False, 'error': f'Failed to place order: {str(e)}'}), 500
 
 
 @app.route('/api/account/trades', methods=['GET'])
@@ -812,4 +703,4 @@ if __name__ == '__main__':
     # Run server
     # For development, use debug=True
     # For production, use a proper WSGI server like gunicorn
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='localhost', port=5000, debug=True)
