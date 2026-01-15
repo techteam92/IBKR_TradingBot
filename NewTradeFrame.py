@@ -680,8 +680,8 @@ def addField(rowYPosition, initial_status_text=""):
     logging.info("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
-    # Configure 11 columns for the new order and 2 rows (labels + fields)
-    for col in range(11):
+    # Configure 12 columns for the new order and 2 rows (labels + fields)
+    for col in range(12):
         field.columnconfigure(col, weight=1, uniform="row")
     for row in range(2):
         field.rowconfigure(row, weight=1)
@@ -719,17 +719,21 @@ def addField(rowYPosition, initial_status_text=""):
     timeFrameLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Time Frame", justify=LEFT)
     timeFrameLbl.grid(row=0, column=7, sticky="ew", padx=5, pady=3)
     
-    # 9) REPLAY label
+    # 9) TIME IN FORCE label
+    timeInForceLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Time In Force", justify=LEFT)
+    timeInForceLbl.grid(row=0, column=8, sticky="ew", padx=5, pady=3)
+    
+    # 10) REPLAY label
     replayLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Replay", justify=LEFT)
-    replayLbl.grid(row=0, column=8, sticky="ew", padx=5, pady=3)
+    replayLbl.grid(row=0, column=9, sticky="ew", padx=5, pady=3)
     
-    # 10) BREAK EVEN label
+    # 11) BREAK EVEN label
     breakEvenLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Break Even", justify=LEFT)
-    breakEvenLbl.grid(row=0, column=9, sticky="ew", padx=5, pady=3)
+    breakEvenLbl.grid(row=0, column=10, sticky="ew", padx=5, pady=3)
     
-    # 11) STATUS label
+    # 12) STATUS label
     statusLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
-    statusLbl.grid(row=0, column=10, sticky="ew", padx=5, pady=3)
+    statusLbl.grid(row=0, column=11, sticky="ew", padx=5, pady=3)
     
     # Fields row (row 1)
     # 1) SYMBOL (column 0)
@@ -871,38 +875,37 @@ def addField(rowYPosition, initial_status_text=""):
     setDefaultTimeFrame(secEntry)
     timeFrame.append(secEntry)
 
-    # 9) REPLAY (column 8)
+    # 9) TIME IN FORCE (column 8)
+    timeForceEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeInForce)
+    timeForceEntry.config(width=10)
+    timeForceEntry.grid(row=1, column=8, sticky="ew", padx=5, pady=3)
+    timeForceEntry.current(0)
+    setDefaultTif(timeForceEntry)
+    timeInForce.append(timeForceEntry)
+
+    # 10) REPLAY (column 9)
     row_index_for_replay = len(symbol) - 1
     replayButton = Button(field, width="10", height="1", text="Replay", bg='#D3D3D3')
-    replayButton.grid(row=1, column=8, sticky="ew", padx=5, pady=3)
+    replayButton.grid(row=1, column=9, sticky="ew", padx=5, pady=3)
     replayEnabled.append(False)  # Initialize replay as disabled
     replayButtonList.append(replayButton)  # Store button reference
     replayButton['command'] = lambda idx=row_index_for_replay: toggle_replay(idx)
 
-    # 10) BREAK EVEN (column 9)
+    # 11) BREAK EVEN (column 10)
     breakEvenEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.breakEven)
     breakEvenEntry.config(width=10)
-    breakEvenEntry.grid(row=1, column=9, sticky="ew", padx=5, pady=3)
+    breakEvenEntry.grid(row=1, column=10, sticky="ew", padx=5, pady=3)
     breakEvenEntry.current(0)
     setDefaultbreakEvenEntryType(breakEvenEntry)
     breakEven.append(breakEvenEntry)
 
-    # 11) STATUS (column 10)
+    # 12) STATUS (column 11)
     statusVar = StringVar(field)
     statusEntry = Entry(field, width="9", textvariable=statusVar)
     statusEntry.config(width=9)
-    statusEntry.grid(row=1, column=10, sticky="ew", padx=5, pady=3)
+    statusEntry.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
     status.append(statusEntry)
     _set_status(len(status) - 1, initial_status_text)
-
-    # Time In Force - hidden but still functional (needed for trading logic)
-    timeForceEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeInForce)
-    timeForceEntry.config(width=10)
-    timeForceEntry.grid(row=1, column=10, padx=0, pady=0)
-    timeForceEntry.grid_remove()  # Hide it but keep it functional
-    timeForceEntry.current(0)
-    setDefaultTif(timeForceEntry)
-    timeInForce.append(timeForceEntry)
 
     # ATR % field removed - functionality removed
     # Create a hidden entry with default value to maintain compatibility

@@ -23,3 +23,7 @@ nest-asyncio==1.5.1
 # Install using the wheel file included in the project:
 # pip install TA_Lib-0.4.19-cp36-cp36m-win_amd64.whl
 
+flask
+flask-cors
+flask-sqlalchemy
+PyJWT

@@ -156,22 +156,53 @@ class connection:
             next_id = self._order_id_counter
             self._order_id_counter += 1
             return next_id
-    def reqPnl(self):
+    def reqPnl(self, retry_count=0, max_retries=10):
+        """
+        Request PnL tracking. Will retry if connection/account not ready yet.
+        """
         try:
+            # Check if connected first
+            if not self.ib.isConnected():
+                if retry_count < max_retries:
+                    logging.info(f"reqPnl: Not connected yet, retrying in 1 second... (attempt {retry_count + 1}/{max_retries})")
+                    import threading
+                    threading.Timer(1.0, lambda: self.reqPnl(retry_count + 1, max_retries)).start()
+                    return
+                else:
+                    logging.warning("reqPnl: Connection not established after max retries. PnL tracking disabled.")
+                    print("Warning: Could not connect to TWS. PnL tracking disabled.")
+                    return
+            
             print("req pnl initializing...")
             accountValues = self.getAccountValue()
+            
             if accountValues and len(accountValues) > 0:
                 account = accountValues[0].account
                 self.ib.reqPnL(account=account)
                 asyncio.ensure_future(self.pnlData())
                 print(f"PnL request successful for account: {account}")
+                logging.info(f"PnL tracking enabled for account: {account}")
             else:
-                logging.warning("Could not get account values. PnL tracking disabled.")
-                print("Warning: No account info available. PnL tracking disabled.")
-                print("This is normal if TWS is not connected yet.")
+                # Retry if account values not available yet
+                if retry_count < max_retries:
+                    logging.info(f"reqPnl: Account values not available yet, retrying in 1 second... (attempt {retry_count + 1}/{max_retries})")
+                    import threading
+                    threading.Timer(1.0, lambda: self.reqPnl(retry_count + 1, max_retries)).start()
+                    return
+                else:
+                    logging.warning("Could not get account values after max retries. PnL tracking disabled.")
+                    print("Warning: No account info available. PnL tracking disabled.")
+                    print("This is normal if TWS is not connected yet or account info is not available.")
         except Exception as e:
-            logging.error(f"Error requesting PnL: {e}")
-            print(f"Warning: Could not initialize PnL tracking: {e}")
+            # Retry on exception if we haven't exceeded max retries
+            if retry_count < max_retries:
+                logging.warning(f"reqPnl: Error on attempt {retry_count + 1}: {e}, retrying in 1 second...")
+                import threading
+                threading.Timer(1.0, lambda: self.reqPnl(retry_count + 1, max_retries)).start()
+                return
+            else:
+                logging.error(f"Error requesting PnL after {max_retries} attempts: {e}")
+                print(f"Warning: Could not initialize PnL tracking: {e}")
 
     async def pnlData(self):
         try:

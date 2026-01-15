@@ -36,16 +36,18 @@ pyinstaller ^
     --hidden-import=asyncio ^
     --hidden-import=datetime ^
     --hidden-import=logging ^
-    --exclude-module=flask ^
-    --exclude-module=flask_sqlalchemy ^
-    --exclude-module=flask_cors ^
-    --exclude-module=werkzeug ^
-    --exclude-module=sqlalchemy ^
-    --exclude-module=jinja2 ^
-    --exclude-module=markupsafe ^
-    --exclude-module=itsdangerous ^
-    --exclude-module=click ^
-    --exclude-module=blinker ^
+    --hidden-import=flask ^
+    --hidden-import=flask_sqlalchemy ^
+    --hidden-import=flask_cors ^
+    --hidden-import=werkzeug ^
+    --hidden-import=sqlalchemy ^
+    --hidden-import=jinja2 ^
+    --hidden-import=markupsafe ^
+    --hidden-import=itsdangerous ^
+    --hidden-import=click ^
+    --hidden-import=blinker ^
+    --hidden-import=jwt ^
+    --hidden-import=PyJWT ^
     --collect-all ib_insync ^
     --collect-all talib ^
     app.py

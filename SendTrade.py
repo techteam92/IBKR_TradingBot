@@ -530,7 +530,7 @@ async def first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,bar
         tradeType = ""
         if Config.historicalData.get(key) == None:
             histData = connection.fb_entry_historical_data(ibContract, timeFrame, chartTime)
-            if (len(histData) == 0):
+            if (histData is None or len(histData) == 0):
                 logging.info("Chart Data is Not Comming for %s contract  and for %s time", ibContract, chartTime)
                 await asyncio.sleep(1)
                 continue
@@ -644,7 +644,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             # chartTime = datetime.datetime.now()
             logging.info("recent chart time for rbb request  %s %s",chartTime,symbol)
             histData = connection.rbb_entry_historical_data(ibContract, timeFrame, chartTime)
-            if (len(histData) == 0):
+            if (histData is None or len(histData) == 0):
                 logging.info("RBB Chart Data is Not Comming for %s contract  and for %s time", ibContract, chartTime)
                 # During overnight, try to get daily candle data as fallback
                 if outsideRth:
@@ -1344,9 +1344,11 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
             Config.takeProfit[0]: 1,    # 1:1
             Config.takeProfit[1]: 1.5,  # 1.5:1
             Config.takeProfit[2]: 2,    # 2:1
-            Config.takeProfit[3]: 3,    # 3:1
+            Config.takeProfit[3]: 2.5,  # 2.5:1
         }
-        # Note: '2.5:1' is at Config.takeProfit[3], already included in multiplier_map
+        # Add 3:1 if it exists (index 4)
+        if len(Config.takeProfit) > 4:
+            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
         
         multiplier = multiplier_map.get(profit, 1)  # Default to 1:1 if not found
         tp_offset = stop_size * multiplier
@@ -1590,10 +1592,57 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
     
     try:
         contract = getContract(symbol, None)
-        histData = _get_latest_hist_bar(connection, contract, timeFrame)
-        if histData is None:
-            logging.error("Unable to fetch historical data for manual stop order %s %s", symbol, timeFrame)
-            return
+        
+        # For Custom stop orders, histData is optional (we have entry_price and custom_stop)
+        # For other stop loss types, we need histData for calculations
+        is_custom_stop = (stopLoss == Config.stopLoss[1])  # 'Custom'
+        histData = None
+        
+        if not is_custom_stop:
+            # For non-Custom stop orders, try to get historical data with retry
+            max_retries = 3
+            retry_count = 0
+            while retry_count < max_retries:
+                histData = _get_latest_hist_bar(connection, contract, timeFrame)
+                if histData is not None:
+                    break
+                retry_count += 1
+                if retry_count < max_retries:
+                    logging.warning("Unable to fetch historical data for manual stop order %s %s (retry %s/%s), waiting...", 
+                                  symbol, timeFrame, retry_count, max_retries)
+                    await asyncio.sleep(2)
+            
+            if histData is None:
+                # Try fallback: get price from tick data or daily candle
+                logging.info("Trying fallback methods to get price data for %s", symbol)
+                try:
+                    if outsideRth:
+                        # Try daily candle first
+                        dailyData = connection.getDailyCandle(contract)
+                        if dailyData and len(dailyData) > 0:
+                            last_close = dailyData[-1].close
+                            histData = {'high': last_close, 'low': last_close, 'close': last_close}
+                            logging.info("Using daily candle data as fallback: %s", histData)
+                        else:
+                            # Try tick data
+                            connection.subscribeTicker(contract)
+                            priceObj = connection.getTickByTick(contract)
+                            if priceObj is not None:
+                                tick_price = priceObj.marketPrice()
+                                connection.cancelTickData(contract)
+                                histData = {'high': tick_price, 'low': tick_price, 'close': tick_price}
+                                logging.info("Using tick data as fallback: %s", histData)
+                except Exception as e:
+                    logging.warning("Fallback methods failed: %s", e)
+                
+                if histData is None:
+                    logging.error("Unable to fetch historical data for manual stop order %s %s after retries and fallbacks", symbol, timeFrame)
+                    return
+        else:
+            # For Custom stop orders, try to get histData but don't fail if unavailable
+            histData = _get_latest_hist_bar(connection, contract, timeFrame)
+            if histData is None:
+                logging.info("Historical data not available for Custom stop order %s %s, proceeding with entry_price and custom_stop only", symbol, timeFrame)
         
         # Calculate stop loss price based on stop loss type
         # For stop orders, when triggered, the actual entry will be slightly different
@@ -1726,9 +1775,11 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
             Config.takeProfit[0]: 1,    # 1:1
             Config.takeProfit[1]: 1.5,  # 1.5:1
             Config.takeProfit[2]: 2,    # 2:1
-            Config.takeProfit[3]: 3,    # 3:1
+            Config.takeProfit[3]: 2.5,  # 2.5:1
         }
-        # Note: '2.5:1' is at Config.takeProfit[3], already included in multiplier_map
+        # Add 3:1 if it exists (index 4)
+        if len(Config.takeProfit) > 4:
+            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
         
         multiplier = multiplier_map.get(profit, 1)  # Default to 1:1 if not found
         tp_offset = stop_size * multiplier
@@ -2539,7 +2590,7 @@ async def rbb_loop_run(connection,key,entry_order):
                     # Regular stop loss: Update based on new bar's high/low
                     newChartTime = getRecentChartTime(old_order['timeFrame'])
                     histData = connection.rbb_entry_historical_data(old_order['contract'], old_order['timeFrame'], newChartTime)
-                    if (len(histData) == 0):
+                    if (histData is None or len(histData) == 0):
                         logging.info("Loop RBB Chart Data is Not Comming for %s contract  and for %s time", old_order['contract'],
                                      newChartTime)
                         await asyncio.sleep(1)
@@ -4738,12 +4789,15 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         elif barType == Config.entryTradeType[7]:  # PBe2
             logging.info("Routing to pull_back_PBe2 for barType='%s' (Config.entryTradeType[7]='%s')", barType, Config.entryTradeType[7])
             await (pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth))
-        elif barType == Config.entryTradeType[7]:  # LB (Note: PBe1e2 removed, indices shifted)
+        elif barType == Config.entryTradeType[8]:  # LB
+            logging.info("Routing to lb1 for barType='%s' (Config.entryTradeType[8]='%s')", barType, Config.entryTradeType[8])
             await (lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[9]:  # LB2
+            logging.info("Routing to lb2 for barType='%s' (Config.entryTradeType[9]='%s')", barType, Config.entryTradeType[9])
             await (lb2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
         elif barType == Config.entryTradeType[10]:  # LB3
+            logging.info("Routing to lb3 for barType='%s' (Config.entryTradeType[10]='%s')", barType, Config.entryTradeType[10])
             await (lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
 
@@ -5440,14 +5494,14 @@ def get_tp_for_selling(connection, timeFrame, contract, profit_type, filled_pric
         stop_size = round((high - low) + Config.add002, Config.roundVal)
 
     multiplier_map = {
-        Config.takeProfit[0]: 1,
-        Config.takeProfit[1]: 1.5,
-        Config.takeProfit[2]: 2,
-        Config.takeProfit[3]: 3.5,  # '2.5:1' is at index 3
+        Config.takeProfit[0]: 1,    # 1:1
+        Config.takeProfit[1]: 1.5,  # 1.5:1
+        Config.takeProfit[2]: 2,    # 2:1
+        Config.takeProfit[3]: 2.5,  # 2.5:1
     }
     # Add 3:1 if it exists (index 4)
     if len(Config.takeProfit) > 4:
-        multiplier_map[Config.takeProfit[4]] = 3
+        multiplier_map[Config.takeProfit[4]] = 3  # 3:1
 
     multiplier = multiplier_map.get(profit_type)
     if multiplier is not None:
@@ -5475,15 +5529,14 @@ def get_tp_for_buying(connection, timeFrame, contract, profit_type, filled_price
         stop_size = round((high - low) + Config.add002, Config.roundVal)
 
     multiplier_map = {
-        Config.takeProfit[0]: 1,
-        Config.takeProfit[1]: 1.5,
-        Config.takeProfit[2]: 2,
-        Config.takeProfit[4]: 2.5,
-        Config.takeProfit[3]: 3.5,  # '2.5:1' is at index 3
+        Config.takeProfit[0]: 1,    # 1:1
+        Config.takeProfit[1]: 1.5,  # 1.5:1
+        Config.takeProfit[2]: 2,    # 2:1
+        Config.takeProfit[3]: 2.5,  # 2.5:1
     }
     # Add 3:1 if it exists (index 4)
     if len(Config.takeProfit) > 4:
-        multiplier_map[Config.takeProfit[4]] = 3
+        multiplier_map[Config.takeProfit[4]] = 3  # 3:1
 
     multiplier = multiplier_map.get(profit_type)
     if multiplier is not None:
@@ -5905,7 +5958,7 @@ async def sendTpSlBuy(connection, entryData):
             else:
                 chartTime = getRecentChartTime(entryData['timeFrame'])
                 histData = connection.getHistoricalChartData(entryData['contract'], entryData['timeFrame'], chartTime)
-                if (len(histData) == 0):
+                if (histData is None or len(histData) == 0):
                     retry_count += 1
                     if retry_count >= max_retries:
                         logging.warning("Chart Data is Not Coming after %s retries for %s contract, using fallback calculation", max_retries, entryData['contract'])
@@ -6674,7 +6727,7 @@ async def sendTpSlBuy(connection, entryData):
             # For Conditional Order, RB, RBB, LB, LB2, LB3: calculate stop size in advance and use it for stop loss calculation
             # Note: RBB (entryTradeType[5]) uses different logic - it updates stop price continuously via rbb_loop_run, but still needs initial LOD/HOD calculation
             elif (entryData['barType'] == Config.entryTradeType[1] or entryData['barType'] == Config.entryTradeType[2] or entryData['barType'] == Config.entryTradeType[4] or entryData['barType'] == Config.entryTradeType[5] or 
-                entryData['barType'] == Config.entryTradeType[9] or entryData['barType'] == Config.entryTradeType[10]):
+                entryData['barType'] == Config.entryTradeType[8] or entryData['barType'] == Config.entryTradeType[9] or entryData['barType'] == Config.entryTradeType[10]):
                 # Calculate stop size for stop loss
                 stop_loss_type = entryData.get('stopLoss')
                 if stop_loss_type == Config.stopLoss[0]:  # EntryBar
@@ -7820,7 +7873,7 @@ async def takeProfitThread(connection, entryData,price,action,orderId):
             logging.info("running  take profit in while loop, status is %s",lmtData['status'])
             histData = connection.getHistoricalChartData(lmtData['contract'], lmtData['timeFrame'],chartTime)
             logging.info("hist data for %s contract id, hist data is { %s }  and for %s time", lmtData['contract'], histData, chartTime)
-            if (len(histData) == 0):
+            if (histData is None or len(histData) == 0):
                 nextSleepTime = nextSleepTime - 1
                 if(nextSleepTime == 0):
                     nextSleepTime = Config.timeDict.get(lmtData['timeFrame'])
@@ -7907,7 +7960,7 @@ async def sendTpSlSell(connection, entryData):
             else:
                 chartTime = getRecentChartTime(entryData['timeFrame'])
                 histData = connection.getHistoricalChartData(entryData['contract'], entryData['timeFrame'], chartTime)
-                if (len(histData) == 0):
+                if (histData is None or len(histData) == 0):
                     retry_count += 1
                     if retry_count >= max_retries:
                         logging.warning("Chart Data is Not Coming after %s retries for %s contract, using fallback calculation", max_retries, entryData['contract'])
@@ -8791,7 +8844,7 @@ async def stopLossThread(connection, entryData,price,action,orderId):
             logging.info("running  stop loss in while loop, status is %s", lmtData['status'])
             histData = connection.getHistoricalChartData(lmtData['contract'], lmtData['timeFrame'], chartTime)
             logging.info("hist data for %s contract id, hist data is { %s }  and of %s time", lmtData['contract'], histData, chartTime)
-            if (len(histData) == 0):
+            if (histData is None or len(histData) == 0):
                 logging.info("hist data not found going to sleep for 1 second")
                 nextSleepTime = nextSleepTime - 1
                 if(nextSleepTime == 0):
@@ -9140,8 +9193,11 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 Config.takeProfit[0]: 1,    # 1:1
                 Config.takeProfit[1]: 1.5,  # 1.5:1
                 Config.takeProfit[2]: 2,    # 2:1
-                Config.takeProfit[3]: 3,    # 3:1
+                Config.takeProfit[3]: 2.5,  # 2.5:1
             }
+            # Add 3:1 if it exists (index 4)
+            if len(Config.takeProfit) > 4:
+                multiplier_map[Config.takeProfit[4]] = 3  # 3:1
             multiplier = multiplier_map.get(profit, 1)
             tp_offset = stop_size * multiplier
             
