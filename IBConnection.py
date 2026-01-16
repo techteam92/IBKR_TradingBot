@@ -78,7 +78,17 @@ class connection:
                 elif is_pbe1:
                     should_send_tp_sl = True  # PBe1 places only entry order in RTH (like RBB), TP/SL sent after fill
                 else:
-                    should_send_tp_sl = True  # Other trade types always need sendTpAndSl
+                    # Check if this is LB, LB2, or LB3
+                    lb_index = 8
+                    lb2_index = 9
+                    lb3_index = 10
+                    is_lb = data['barType'] == Config.entryTradeType[lb_index] if len(Config.entryTradeType) > lb_index else False
+                    is_lb2 = data['barType'] == Config.entryTradeType[lb2_index] if len(Config.entryTradeType) > lb2_index else False
+                    is_lb3 = data['barType'] == Config.entryTradeType[lb3_index] if len(Config.entryTradeType) > lb3_index else False
+                    if is_lb or is_lb2 or is_lb3:
+                        should_send_tp_sl = is_extended_hours  # LB/LB2/LB3 use bracket orders in RTH, separate orders in extended hours
+                    else:
+                        should_send_tp_sl = True  # Other trade types always need sendTpAndSl
             
             logging.info("orderStatusEvent: should_send_tp_sl=%s (barType != entryTradeType[3] (FB): %s, not (is_manual_order and not is_extended_hours): %s)",
                         should_send_tp_sl, 
