@@ -18,6 +18,17 @@ class connection:
 
     # it will set trade order status value in global variable.
     def orderStatusEvent(self,trade: Trade):
+        # Handle Error 103 (Duplicate order id) - retry with new order ID
+        if trade.orderStatus.status == 'Cancelled':
+            error_msg = getattr(trade.orderStatus, 'whyHeld', '') or ''
+            log_entries = getattr(trade, 'log', [])
+            for log_entry in log_entries:
+                if hasattr(log_entry, 'message') and ('Duplicate order id' in log_entry.message or '103' in log_entry.message):
+                    logging.warning(f"Error 103 (Duplicate order id) detected for orderId={trade.order.orderId}. This order was rejected by IB.")
+                    # Note: We can't retry here because the order is already cancelled
+                    # The retry should happen in placeTrade before the order is sent
+                    break
+        
         if  trade.orderStatus.status == 'Filled':
             Config.orderFilledPrice.update({ trade.order.orderId :  trade.orderStatus.avgFillPrice })
 
@@ -114,6 +125,7 @@ class connection:
             self.ib.connect(host=Config.host, port=Config.port, clientId=Config.clientId)
             # self.ib.waitOnUpdate()
             self.ib.orderStatusEvent += self.orderStatusEvent
+            self.ib.errorEvent += self._handle_error_event
             self.pnlEvent = self.pnlData
             # self.ib.pendingTickersEvent += self.onPendingTickers
             # self.reqPnl()
@@ -165,7 +177,33 @@ class connection:
                 self._order_id_counter = int(time.time())
             next_id = self._order_id_counter
             self._order_id_counter += 1
+            
+            # Double-check that this order ID is not already in use
+            # This helps prevent Error 103 (Duplicate order id)
+            try:
+                existing_trades = self.ib.trades()
+                max_retries = 10
+                retry_count = 0
+                while next_id in existing_trades and retry_count < max_retries:
+                    logging.warning(f"Order ID {next_id} already exists in trades, getting next ID...")
+                    next_id = self._order_id_counter
+                    self._order_id_counter += 1
+                    retry_count += 1
+                    existing_trades = self.ib.trades()  # Refresh trades list
+                
+                if retry_count > 0:
+                    logging.info(f"Adjusted order ID to {next_id} after {retry_count} retries to avoid duplicates")
+            except Exception as e:
+                logging.debug(f"Error checking existing trades for duplicate order ID: {e}")
+            
             return next_id
+    
+    def _handle_error_event(self, reqId, errorCode, errorString, contract):
+        """Handle error events from IB, especially Error 103 (Duplicate order id)"""
+        if errorCode == 103 or 'Duplicate order id' in errorString:
+            logging.error(f"Error 103 (Duplicate order id) detected: reqId={reqId}, errorString={errorString}")
+            # Note: We can't automatically retry here, but this helps with logging
+            # The actual retry should happen in placeTrade when the error is detected
     def reqPnl(self, retry_count=0, max_retries=10):
         """
         Request PnL tracking. Will retry if connection/account not ready yet.
@@ -212,7 +250,7 @@ class connection:
                 return
             else:
                 logging.error(f"Error requesting PnL after {max_retries} attempts: {e}")
-                print(f"Warning: Could not initialize PnL tracking: {e}")
+            print(f"Warning: Could not initialize PnL tracking: {e}")
 
     async def pnlData(self):
         try:
@@ -359,6 +397,17 @@ class connection:
             logging.debug("Error checking existing trades: %s (this is usually fine)", e)
         
         try:
+            response = self.ib.placeOrder(contract=contract, order=order)
+            # Check if the response indicates a duplicate order ID error
+            if response and hasattr(response, 'orderStatus'):
+                if response.orderStatus.status == 'Cancelled':
+                    error_msg = getattr(response.orderStatus, 'whyHeld', '') or str(response.orderStatus)
+                    if 'Duplicate order id' in error_msg or '103' in error_msg:
+                        # Duplicate order ID detected - get new ID and retry
+                        logging.warning(f"Duplicate order ID {order.orderId} detected in response. Getting new order ID and retrying...")
+                        new_order_id = self.get_next_order_id()
+                        order.orderId = new_order_id
+                        logging.info(f"Retrying order placement with new order ID: {new_order_id}")
             response = self.ib.placeOrder(contract=contract, order=order)
             return response
         except AssertionError as e:

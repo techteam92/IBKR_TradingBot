@@ -49,6 +49,7 @@ historicalData={}
 currentPnl = 0
 pbe1_saved = {}
 order_replay_pending = {}  # Map (symbol, timeFrame, barType, buySell, timestamp) to replay state for pending orders
+option_trade_params = {}  # Map trade_key to option trading parameters (contract, expire, order types)
 
 timeFrame = ['1 min', '2 mins', '3 mins', '5 mins', '10 mins', '15 mins', '30 mins','1 hour']
 timeDictInMinute ={'1 min':1, '2 mins':2, '3 mins':3, '5 mins':5, '10 mins':10, '15 mins':15, '20 mins':20, '30 mins':30, '1 hour':60,
@@ -85,6 +86,9 @@ fontName2 = 'Times New Roman'
 fontSize2 = 12
 
 roundVal=2
+
+# Option trading configuration
+optionOrderTypes = ['Market', 'Bid+', 'Ask-']
 
 
 

@@ -128,7 +128,7 @@ class TkApp:
                 loop = 2
 
 
- # Flask API Endpoints
+# Flask API Endpoints
 @api_app.route('/api/place-order', methods=['POST'])
 def api_place_order():
     """

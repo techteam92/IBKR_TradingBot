@@ -4398,7 +4398,7 @@ async def pbe1_loop_run(connection, key, entry_order):
                 # This ensures we get the latest bar, not a bar at a specific time
                 chartTime = getRecentChartTime(old_order['timeFrame'])
                 recentBarData = connection.getHistoricalChartDataForEntry(old_order['contract'], old_order['timeFrame'], chartTime)
-                if (len(recentBarData) == 0):
+                if recentBarData is None or len(recentBarData) == 0:
                     logging.info("PBe1 loop: Chart Data is Not Coming for %s contract  and for %s time", old_order['contract'], chartTime)
                     await asyncio.sleep(1)
                     continue
@@ -4867,12 +4867,14 @@ def _get_lod_hod_for_stop_loss(connection, contract, timeFrame):
     logging.warning("No historical data available for HOD/LOD calculation")
     return None, None, {}
 
-async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points):
+async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points, option_enabled=False, option_contract="", option_expire="", option_entry_order_type="Market", option_sl_order_type="Market", option_tp_order_type="Market"):
     try:
         symbol=symbol.upper()
         if entry_points == "":
             entry_points = 0
-        logging.info("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s",  symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points)
+        logging.info("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s option_enabled=%s option_contract=%s option_expire=%s",  
+                    symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points,
+                    option_enabled, option_contract, option_expire)
         logging.info("SendTrade: barType='%s', Config.entryTradeType=%s", barType, Config.entryTradeType)
         logging.info("SendTrade: Checking routing - barType='%s', entryTradeType[6]='%s'", barType, Config.entryTradeType[6] if len(Config.entryTradeType) > 6 else "N/A")
 
@@ -4951,6 +4953,25 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             logging.info("Routing to lb3 for barType='%s' (Config.entryTradeType[10]='%s')", barType, Config.entryTradeType[10])
             await (lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
+
+        # Handle option trading if enabled
+        # Note: Option orders will be placed after the stock entry order fills
+        # The option parameters are stored and will be used in StatusUpdate when entry fills
+        if option_enabled and option_contract and option_expire:
+            logging.info("Option trading enabled for %s: contract=%s, expire=%s, entry_order_type=%s, sl_order_type=%s, tp_order_type=%s", 
+                        symbol, option_contract, option_expire, option_entry_order_type, option_sl_order_type, option_tp_order_type)
+            # Store option parameters in Config for later use when entry fills
+            trade_key = (symbol, timeFrame, barType, buySellType, datetime.datetime.now().timestamp())
+            Config.option_trade_params = Config.option_trade_params if hasattr(Config, 'option_trade_params') else {}
+            Config.option_trade_params[trade_key] = {
+                'enabled': True,
+                'contract': option_contract,
+                'expire': option_expire,
+                'entry_order_type': option_entry_order_type,
+                'sl_order_type': option_sl_order_type,
+                'tp_order_type': option_tp_order_type
+            }
+            logging.info("Option trading parameters stored for trade key: %s", trade_key)
 
         logging.info("task done for %s symbol",symbol)
 
@@ -5984,6 +6005,29 @@ def sendTpAndSl(connection, entryData):
                             logging.error("Traceback: %s", traceback.format_exc())
                     except Exception as e:
                         logging.error("Error in task_done_callback: %s", e)
+                
+                # Check if option trading is enabled for this trade
+                symbol = entryData.get('usersymbol', '')
+                timeFrame = entryData.get('timeFrame', '')
+                barType = entryData.get('barType', '')
+                userBuySell = entryData.get('userBuySell', '')
+                
+                # Try to find matching option trade parameters
+                option_params = None
+                if hasattr(Config, 'option_trade_params') and Config.option_trade_params:
+                    for trade_key, params in list(Config.option_trade_params.items()):
+                        if (trade_key[0] == symbol and trade_key[1] == timeFrame and 
+                            trade_key[2] == barType and trade_key[3] == userBuySell):
+                            option_params = params
+                            # Remove from pending after use
+                            del Config.option_trade_params[trade_key]
+                            logging.info("Found option trade parameters for %s: %s", symbol, option_params)
+                            break
+                
+                # Store option params in entryData for use in sendTpSlBuy/sendTpSlSell
+                if option_params:
+                    entryData['option_params'] = option_params
+                    logging.info("Stored option_params in entryData for %s", symbol)
                 
                 if (entryData['action'] == "BUY"):
                     logging.info("Market order filled we will send buy Order, market data is %s",entryData)
@@ -7171,6 +7215,23 @@ async def sendTpSlBuy(connection, entryData):
             mocPrice = 0
             logging.info("Sending Moc Order  of %s price ",mocPrice)
             sendMoc(connection,entryData,mocPrice,"BUY")
+            
+            # Handle option trading if enabled (using external module)
+            try:
+                from OptionTrading import handleOptionTrading
+                # Store calculated prices in entryData for option trading
+                if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
+                    entryData['stop_loss_price'] = stpPrice
+                if 'price' in locals() and price and price > 0:
+                    entryData['profit_price'] = price
+                if 'filled_price' in locals():
+                    entryData['filledPrice'] = filled_price
+                handleOptionTrading(connection, entryData)
+            except ImportError:
+                logging.warning("OptionTrading module not found, skipping option trading")
+            except Exception as e:
+                logging.error("Error in option trading: %s", e)
+            
             break
     except Exception as e:
         logging.error("error in take profit and sl buy trade %s",e)
@@ -8951,6 +9012,23 @@ async def sendTpSlSell(connection, entryData):
             mocPrice = 0
             logging.info("Sending Moc Order  of %s price ", mocPrice)
             sendMoc(connection, entryData, mocPrice, "SELL")
+            
+            # Handle option trading if enabled (using external module)
+            try:
+                from OptionTrading import handleOptionTrading
+                # Store calculated prices in entryData for option trading
+                if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
+                    entryData['stop_loss_price'] = stpPrice
+                if 'price' in locals() and price and price > 0:
+                    entryData['profit_price'] = price
+                if 'filled_price' in locals():
+                    entryData['filledPrice'] = filled_price
+                handleOptionTrading(connection, entryData)
+            except ImportError:
+                logging.warning("OptionTrading module not found, skipping option trading")
+            except Exception as e:
+                logging.error("Error in option trading: %s", e)
+            
             break
     except Exception as e:
         traceback.print_exc()

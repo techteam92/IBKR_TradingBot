@@ -22,6 +22,12 @@ cancelButton = []
 row_async_tasks = []
 replayEnabled = []  # Track replay state for each row
 replayButtonList = []  # Track replay buttons for each row
+optionEnabled = []  # Track option trading state for each row
+optionContract = []  # Store option contract (strike price) for each row
+optionExpire = []  # Store option expiration date for each row
+optionEntryOrderType = []  # Store option entry order type for each row
+optionStopLossOrderType = []  # Store option stop loss order type for each row
+optionProfitOrderType = []  # Store option profit order type for each row
 
 rowPosition=0
 buttonRely=0.3
@@ -552,6 +558,33 @@ def execute_row(row_index):
     if row_index < len(replayEnabled):
         is_replay_enabled = replayEnabled[row_index]
 
+    # Get option trading state and parameters for this row
+    is_option_enabled = False
+    option_contract = ""
+    option_expire = ""
+    option_entry_order_type = "Market"
+    option_sl_order_type = "Market"
+    option_tp_order_type = "Market"
+    
+    if row_index < len(optionEnabled):
+        is_option_enabled = optionEnabled[row_index]
+        if is_option_enabled:
+            if row_index < len(optionContract):
+                option_contract = optionContract[row_index].get()
+            if row_index < len(optionExpire):
+                option_expire = optionExpire[row_index].get()
+            if row_index < len(optionEntryOrderType):
+                option_entry_order_type = optionEntryOrderType[row_index].get()
+            if row_index < len(optionStopLossOrderType):
+                option_sl_order_type = optionStopLossOrderType[row_index].get()
+            if row_index < len(optionProfitOrderType):
+                option_tp_order_type = optionProfitOrderType[row_index].get()
+            
+            # Validate option parameters
+            if not option_contract or not option_expire:
+                tkinter.messagebox.showerror('Error', "Option trading requires Contract (Strike Price) and Expiration date")
+                return
+
     # Store replay state for this trade (will be retrieved in StatusUpdate)
     trade_key = (symbol[row_index].get(), timeFrame[row_index].get(), tradeType[row_index].get(), 
                  buySell[row_index].get(), datetime.datetime.now().timestamp())
@@ -576,6 +609,12 @@ def execute_row(row_index):
             breakEven[row_index].get(),
             outsideRth,
             entry_points[row_index].get(),
+            is_option_enabled,  # New parameter: option enabled
+            option_contract,  # New parameter: option contract (strike)
+            option_expire,  # New parameter: option expiration
+            option_entry_order_type,  # New parameter: entry order type
+            option_sl_order_type,  # New parameter: stop loss order type
+            option_tp_order_type,  # New parameter: profit order type
         )
     )
 
@@ -602,6 +641,154 @@ def toggle_replay(row_index):
                 replayButton.config(bg='#D3D3D3')  # Light gray when disabled
                 logging.info("Replay disabled for row %s", row_index)
 
+
+def _toggle_option_fields(row_index):
+    """Show/hide option configuration modal when option checkbox is toggled"""
+    if row_index < len(optionEnabled):
+        optionEnabled[row_index] = not optionEnabled[row_index]
+        if optionEnabled[row_index]:
+            # Show option configuration modal
+            _show_option_config_modal(row_index)
+        else:
+            # Clear option fields when disabled
+            if row_index < len(optionContract):
+                optionContract[row_index].set("")
+            if row_index < len(optionExpire):
+                optionExpire[row_index].set("")
+            if row_index < len(optionEntryOrderType):
+                optionEntryOrderType[row_index].set("Market")
+            if row_index < len(optionStopLossOrderType):
+                optionStopLossOrderType[row_index].set("Market")
+            if row_index < len(optionProfitOrderType):
+                optionProfitOrderType[row_index].set("Market")
+
+def _show_option_config_modal(row_index):
+    """Show modal dialog to configure option trading parameters"""
+    # Get parent window
+    parent = scrollable_frame.winfo_toplevel()
+    
+    # Create modal dialog
+    modal = tkinter.Toplevel(parent)
+    modal.title("Option Trading Configuration")
+    modal.geometry("400x350")
+    modal.resizable(False, False)
+    modal.transient(parent)
+    modal.grab_set()
+    
+    # Center the dialog
+    modal.update_idletasks()
+    x = (modal.winfo_screenwidth() // 2) - (400 // 2)
+    y = (modal.winfo_screenheight() // 2) - (350 // 2)
+    modal.geometry(f"400x350+{x}+{y}")
+    
+    # Contract (Strike Price)
+    Label(modal, text="Contract (Strike Price):", font=(Config.fontName2, Config.fontSize2)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
+    contract_entry = Entry(modal, width=15, font=(Config.fontName2, Config.fontSize2))
+    contract_entry.grid(row=0, column=1, padx=10, pady=5)
+    if row_index < len(optionContract):
+        contract_entry.insert(0, optionContract[row_index].get())
+    
+    # Expiration Date
+    Label(modal, text="Expiration (YYYYMMDD):", font=(Config.fontName2, Config.fontSize2)).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+    expire_entry = Entry(modal, width=15, font=(Config.fontName2, Config.fontSize2))
+    expire_entry.grid(row=1, column=1, padx=10, pady=5)
+    if row_index < len(optionExpire):
+        expire_entry.insert(0, optionExpire[row_index].get())
+    
+    # Entry Order Type
+    Label(modal, text="Entry Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=2, column=0, sticky="w", padx=10, pady=5)
+    entry_order_combo = ttk.Combobox(modal, state="readonly", width=12, values=Config.optionOrderTypes)
+    entry_order_combo.grid(row=2, column=1, padx=10, pady=5)
+    if row_index < len(optionEntryOrderType):
+        current_value = optionEntryOrderType[row_index].get()
+        if current_value in Config.optionOrderTypes:
+            entry_order_combo.current(Config.optionOrderTypes.index(current_value))
+        else:
+            entry_order_combo.current(0)
+    
+    # Stop Loss Order Type
+    Label(modal, text="Stop Loss Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=3, column=0, sticky="w", padx=10, pady=5)
+    sl_order_combo = ttk.Combobox(modal, state="readonly", width=12, values=Config.optionOrderTypes)
+    sl_order_combo.grid(row=3, column=1, padx=10, pady=5)
+    if row_index < len(optionStopLossOrderType):
+        current_value = optionStopLossOrderType[row_index].get()
+        if current_value in Config.optionOrderTypes:
+            sl_order_combo.current(Config.optionOrderTypes.index(current_value))
+        else:
+            sl_order_combo.current(0)
+    
+    # Profit Order Type
+    Label(modal, text="Profit Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=4, column=0, sticky="w", padx=10, pady=5)
+    profit_order_combo = ttk.Combobox(modal, state="readonly", width=12, values=Config.optionOrderTypes)
+    profit_order_combo.grid(row=4, column=1, padx=10, pady=5)
+    if row_index < len(optionProfitOrderType):
+        current_value = optionProfitOrderType[row_index].get()
+        if current_value in Config.optionOrderTypes:
+            profit_order_combo.current(Config.optionOrderTypes.index(current_value))
+        else:
+            profit_order_combo.current(0)
+    
+    # Info label
+    info_text = "Bid+: Start with bid, increase 5 cents until fill\nAsk-: Start with ask, decrease 5 cents until fill"
+    Label(modal, text=info_text, font=(Config.fontName2, 9), justify=LEFT).grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=10)
+    
+    # Buttons frame
+    button_frame = Frame(modal)
+    button_frame.grid(row=6, column=0, columnspan=2, pady=10)
+    
+    def save_option_config():
+        try:
+            # Validate and save contract (strike price)
+            contract_val = contract_entry.get().strip()
+            if contract_val:
+                float(contract_val)  # Validate it's a number
+                if row_index < len(optionContract):
+                    optionContract[row_index].set(contract_val)
+            else:
+                if row_index < len(optionContract):
+                    optionContract[row_index].set("")
+            
+            # Validate and save expiration
+            expire_val = expire_entry.get().strip()
+            if expire_val:
+                # Validate format YYYYMMDD
+                if len(expire_val) == 8 and expire_val.isdigit():
+                    if row_index < len(optionExpire):
+                        optionExpire[row_index].set(expire_val)
+                else:
+                    tkinter.messagebox.showerror("Invalid Input", "Expiration must be in YYYYMMDD format (e.g., 20260119)")
+                    expire_entry.focus()
+                    return
+            else:
+                if row_index < len(optionExpire):
+                    optionExpire[row_index].set("")
+            
+            # Save order types
+            if row_index < len(optionEntryOrderType):
+                optionEntryOrderType[row_index].set(entry_order_combo.get())
+            if row_index < len(optionStopLossOrderType):
+                optionStopLossOrderType[row_index].set(sl_order_combo.get())
+            if row_index < len(optionProfitOrderType):
+                optionProfitOrderType[row_index].set(profit_order_combo.get())
+            
+            modal.destroy()
+        except ValueError:
+            tkinter.messagebox.showerror("Invalid Input", "Contract (Strike Price) must be a valid number")
+            contract_entry.focus()
+    
+    def cancel_option_config():
+        # Disable option if cancelled
+        if row_index < len(optionEnabled):
+            optionEnabled[row_index] = False
+        modal.destroy()
+    
+    Button(button_frame, text="OK", width=8, command=save_option_config).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Cancel", width=8, command=cancel_option_config).pack(side=LEFT, padx=5)
+    
+    # Bind Enter key to save
+    contract_entry.bind("<Return>", lambda e: save_option_config())
+    expire_entry.bind("<Return>", lambda e: save_option_config())
+    contract_entry.focus()
 
 def cancel_row(row_index):
     async_task = row_async_tasks[row_index]
@@ -680,8 +867,8 @@ def addField(rowYPosition, initial_status_text=""):
     logging.info("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
-    # Configure 12 columns for the new order and 2 rows (labels + fields)
-    for col in range(12):
+    # Configure 13 columns for the new order (added Option column) and 2 rows (labels + fields)
+    for col in range(13):
         field.columnconfigure(col, weight=1, uniform="row")
     for row in range(2):
         field.rowconfigure(row, weight=1)
@@ -731,9 +918,13 @@ def addField(rowYPosition, initial_status_text=""):
     breakEvenLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Break Even", justify=LEFT)
     breakEvenLbl.grid(row=0, column=10, sticky="ew", padx=5, pady=3)
     
-    # 12) STATUS label
+    # 12) OPTION label
+    optionLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Option", justify=LEFT)
+    optionLbl.grid(row=0, column=11, sticky="ew", padx=5, pady=3)
+    
+    # 13) STATUS label
     statusLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
-    statusLbl.grid(row=0, column=11, sticky="ew", padx=5, pady=3)
+    statusLbl.grid(row=0, column=12, sticky="ew", padx=5, pady=3)
     
     # Fields row (row 1)
     # 1) SYMBOL (column 0)
@@ -899,11 +1090,24 @@ def addField(rowYPosition, initial_status_text=""):
     setDefaultbreakEvenEntryType(breakEvenEntry)
     breakEven.append(breakEvenEntry)
 
-    # 12) STATUS (column 11)
+    # 12) OPTION (column 11)
+    row_index_for_option = len(symbol) - 1
+    optionVar = IntVar(field, 0)
+    optionCheckbox = Checkbutton(field, text="Option", variable=optionVar, 
+                                  command=lambda idx=row_index_for_option: _toggle_option_fields(idx))
+    optionCheckbox.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
+    optionEnabled.append(False)  # Initialize option as disabled
+    optionContract.append(StringVar(field, ""))  # Store contract (strike price)
+    optionExpire.append(StringVar(field, ""))  # Store expiration date
+    optionEntryOrderType.append(StringVar(field, "Market"))  # Default entry order type
+    optionStopLossOrderType.append(StringVar(field, "Market"))  # Default stop loss order type
+    optionProfitOrderType.append(StringVar(field, "Market"))  # Default profit order type
+    
+    # 13) STATUS (column 12)
     statusVar = StringVar(field)
     statusEntry = Entry(field, width="9", textvariable=statusVar)
     statusEntry.config(width=9)
-    statusEntry.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
+    statusEntry.grid(row=1, column=12, sticky="ew", padx=5, pady=3)
     status.append(statusEntry)
     _set_status(len(status) - 1, initial_status_text)
 
