@@ -73,11 +73,13 @@ class connection:
                 # Conditional Order uses bracket orders in RTH (like Custom entry), but needs sendTpAndSl in extended hours
                 # RBB and PBe1 place only entry order in RTH, TP/SL sent after fill (like RBB)
                 # In extended hours, RB and RBB still need sendTpAndSl (don't use bracket orders)
-                is_conditional_order = data['barType'] == Config.entryTradeType[conditional_order_index] if len(Config.entryTradeType) > conditional_order_index else False
-                is_fb = data['barType'] == Config.entryTradeType[fb_index]
-                is_rb = data['barType'] == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
-                is_rbb = data['barType'] == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
-                is_pbe1 = data['barType'] == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
+                # Note: Option orders don't have 'barType', so use .get() with empty string default
+                bar_type = data.get('barType', '')
+                is_conditional_order = bar_type == Config.entryTradeType[conditional_order_index] if len(Config.entryTradeType) > conditional_order_index else False
+                is_fb = bar_type == Config.entryTradeType[fb_index]
+                is_rb = bar_type == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
+                is_rbb = bar_type == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
+                is_pbe1 = bar_type == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
                 if is_conditional_order:
                     should_send_tp_sl = is_extended_hours  # Conditional Order uses bracket orders in RTH, separate orders in extended hours
                 elif is_fb:
@@ -93,9 +95,9 @@ class connection:
                     lb_index = 8
                     lb2_index = 9
                     lb3_index = 10
-                    is_lb = data['barType'] == Config.entryTradeType[lb_index] if len(Config.entryTradeType) > lb_index else False
-                    is_lb2 = data['barType'] == Config.entryTradeType[lb2_index] if len(Config.entryTradeType) > lb2_index else False
-                    is_lb3 = data['barType'] == Config.entryTradeType[lb3_index] if len(Config.entryTradeType) > lb3_index else False
+                    is_lb = bar_type == Config.entryTradeType[lb_index] if len(Config.entryTradeType) > lb_index else False
+                    is_lb2 = bar_type == Config.entryTradeType[lb2_index] if len(Config.entryTradeType) > lb2_index else False
+                    is_lb3 = bar_type == Config.entryTradeType[lb3_index] if len(Config.entryTradeType) > lb3_index else False
                     if is_lb or is_lb2 or is_lb3:
                         should_send_tp_sl = is_extended_hours  # LB/LB2/LB3 use bracket orders in RTH, separate orders in extended hours
                     else:
@@ -103,7 +105,7 @@ class connection:
             
             logging.info("orderStatusEvent: should_send_tp_sl=%s (barType != entryTradeType[3] (FB): %s, not (is_manual_order and not is_extended_hours): %s)",
                         should_send_tp_sl, 
-                        data['barType'] != Config.entryTradeType[3],
+                        bar_type != Config.entryTradeType[3] if bar_type else 'N/A (option order)',
                         not (is_manual_order and not is_extended_hours))
             
             # Only call sendTpAndSl when entry order is Filled (not for PendingCancel, Submitted, etc.)
@@ -118,6 +120,52 @@ class connection:
             else:
                 logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
                             trade.order.orderId, bar_type, ord_type)
+
+            # Option trading: Trigger option orders when stock orders are placed or fill
+            # - Entry placed (PreSubmitted/Submitted): Place option orders using trigger price (for immediate execution)
+            # - Entry fills: Place option orders using fill price (fallback if not already placed)
+            # - Option entry fills: Place option stop loss and take profit orders (to avoid Error 201)
+            # - Stop loss/Profit fills: Trigger corresponding option orders
+            try:
+                logging.info("orderStatusEvent: Checking option trading - orderId=%s, status=%s, ord_type=%s, barType=%s", 
+                            trade.order.orderId, trade.orderStatus.status, ord_type, bar_type)
+                
+                if ord_type == 'Entry':
+                    # For Entry orders: Trigger option orders when order is placed (PreSubmitted/Submitted) or filled
+                    # This ensures option orders are placed immediately when stock order is submitted
+                    if trade.orderStatus.status in ('PreSubmitted', 'Submitted'):
+                        logging.info("orderStatusEvent: Entry order PLACED (status=%s) - calling handleOptionTradingForEntryFill for orderId=%s", 
+                                    trade.orderStatus.status, trade.order.orderId)
+                        from OptionTrading import handleOptionTradingForEntryFill
+                        handleOptionTradingForEntryFill(self, trade.order.orderId, data)
+                    elif trade.orderStatus.status == 'Filled':
+                        # Also handle fills in case option orders weren't placed earlier
+                        logging.info("orderStatusEvent: Entry order FILLED - calling handleOptionTradingForEntryFill for orderId=%s", 
+                                    trade.order.orderId)
+                        from OptionTrading import handleOptionTradingForEntryFill
+                        handleOptionTradingForEntryFill(self, trade.order.orderId, data)
+                elif ord_type == 'OptionEntry' and trade.orderStatus.status == 'Filled':
+                    # When option entry order fills, place stop loss and take profit orders
+                    # This avoids Error 201 (cannot have both BUY and SELL orders open)
+                    logging.info("orderStatusEvent: Option entry order FILLED - calling handleOptionEntryFill for orderId=%s", 
+                                trade.order.orderId)
+                    from OptionTrading import handleOptionEntryFill
+                    handleOptionEntryFill(self, trade.order.orderId)
+                elif ord_type in ('OptionStopLoss', 'OptionProfit') and trade.orderStatus.status == 'Filled':
+                    # When option TP or SL fills, cancel the other bracket order
+                    logging.info("orderStatusEvent: Option %s order FILLED - calling handleOptionTpSlFill for orderId=%s", 
+                                ord_type, trade.order.orderId)
+                    from OptionTrading import handleOptionTpSlFill
+                    handleOptionTpSlFill(self, trade.order.orderId, ord_type)
+                elif trade.orderStatus.status == 'Filled':
+                    # For StopLoss/TakeProfit fills: Trigger corresponding option orders
+                    logging.info("orderStatusEvent: TP/SL order FILLED - calling triggerOptionOrderOnStockFill for orderId=%s", 
+                                trade.order.orderId)
+                    from OptionTrading import triggerOptionOrderOnStockFill
+                    triggerOptionOrderOnStockFill(self, trade.order.orderId, ord_type, bar_type)
+            except Exception as e:
+                logging.error("orderStatusEvent: Error in option order trigger for orderId=%s: %s", trade.order.orderId, e)
+                logging.error(traceback.format_exc())
 
     # tws connection stablish
     def connect(self):

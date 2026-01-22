@@ -23,11 +23,12 @@ row_async_tasks = []
 replayEnabled = []  # Track replay state for each row
 replayButtonList = []  # Track replay buttons for each row
 optionEnabled = []  # Track option trading state for each row
-optionContract = []  # Store option contract (strike price) for each row
-optionExpire = []  # Store option expiration date for each row
+optionContract = []  # Store option contract (strike selection code) for each row
+optionExpire = []  # Store option expiration selection (weeks out or YYYYMMDD) for each row
 optionEntryOrderType = []  # Store option entry order type for each row
 optionStopLossOrderType = []  # Store option stop loss order type for each row
 optionProfitOrderType = []  # Store option profit order type for each row
+optionRiskAmount = []  # Store option risk amount ($) for each row
 
 rowPosition=0
 buttonRely=0.3
@@ -565,6 +566,7 @@ def execute_row(row_index):
     option_entry_order_type = "Market"
     option_sl_order_type = "Market"
     option_tp_order_type = "Market"
+    option_risk_amount = ""
     
     if row_index < len(optionEnabled):
         is_option_enabled = optionEnabled[row_index]
@@ -579,10 +581,12 @@ def execute_row(row_index):
                 option_sl_order_type = optionStopLossOrderType[row_index].get()
             if row_index < len(optionProfitOrderType):
                 option_tp_order_type = optionProfitOrderType[row_index].get()
+            if row_index < len(optionRiskAmount):
+                option_risk_amount = optionRiskAmount[row_index].get()
             
-            # Validate option parameters
+            # Validate option parameters (strike selection and expiration selection)
             if not option_contract or not option_expire:
-                tkinter.messagebox.showerror('Error', "Option trading requires Contract (Strike Price) and Expiration date")
+                tkinter.messagebox.showerror('Error', "Option trading requires Strike and Expiration settings")
                 return
 
     # Store replay state for this trade (will be retrieved in StatusUpdate)
@@ -615,6 +619,7 @@ def execute_row(row_index):
             option_entry_order_type,  # New parameter: entry order type
             option_sl_order_type,  # New parameter: stop loss order type
             option_tp_order_type,  # New parameter: profit order type
+            option_risk_amount,  # New parameter: risk amount for options
         )
     )
 
@@ -681,24 +686,53 @@ def _show_option_config_modal(row_index):
     y = (modal.winfo_screenheight() // 2) - (350 // 2)
     modal.geometry(f"400x350+{x}+{y}")
     
-    # Contract (Strike Price)
-    Label(modal, text="Contract (Strike Price):", font=(Config.fontName2, Config.fontSize2)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
-    contract_entry = Entry(modal, width=15, font=(Config.fontName2, Config.fontSize2))
-    contract_entry.grid(row=0, column=1, padx=10, pady=5)
+    # Contract (Strike Price) - dropdown: ATM, OTM 1, OTM 2, OTM 3
+    Label(modal, text="Strike (Contract):", font=(Config.fontName2, Config.fontSize2)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
+    strike_options = ["ATM", "OTM 1", "OTM 2", "OTM 3"]
+    contract_combo = ttk.Combobox(modal, state="readonly", width=12, values=strike_options)
+    contract_combo.grid(row=0, column=1, padx=10, pady=5)
     if row_index < len(optionContract):
-        contract_entry.insert(0, optionContract[row_index].get())
+        current_val = optionContract[row_index].get()
+        # Map stored internal codes back to combo text
+        mapping = {
+            "ATM": "ATM",
+            "OTM1": "OTM 1",
+            "OTM2": "OTM 2",
+            "OTM3": "OTM 3",
+        }
+        display_val = mapping.get(current_val, "ATM")
+        if display_val in strike_options:
+            contract_combo.set(display_val)
+        else:
+            contract_combo.set("ATM")
+    else:
+        contract_combo.set("ATM")
     
-    # Expiration Date
-    Label(modal, text="Expiration (YYYYMMDD):", font=(Config.fontName2, Config.fontSize2)).grid(row=1, column=0, sticky="w", padx=10, pady=5)
-    expire_entry = Entry(modal, width=15, font=(Config.fontName2, Config.fontSize2))
-    expire_entry.grid(row=1, column=1, padx=10, pady=5)
+    # Expiration Date - dropdown: 0,1,2,4,8 weeks out
+    Label(modal, text="Expiration (weeks):", font=(Config.fontName2, Config.fontSize2)).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+    expiry_options = ["0", "1", "2", "4", "8"]
+    expire_combo = ttk.Combobox(modal, state="readonly", width=12, values=expiry_options)
+    expire_combo.grid(row=1, column=1, padx=10, pady=5)
     if row_index < len(optionExpire):
-        expire_entry.insert(0, optionExpire[row_index].get())
+        current_exp = optionExpire[row_index].get() or "0"
+        if current_exp in expiry_options:
+            expire_combo.set(current_exp)
+        else:
+            expire_combo.set("0")
+
+    # Risk amount ($) for options
+    Label(modal, text="Risk Amount ($):", font=(Config.fontName2, Config.fontSize2)).grid(row=2, column=0, sticky="w", padx=10, pady=5)
+    risk_entry = Entry(modal, width=15, font=(Config.fontName2, Config.fontSize2))
+    risk_entry.grid(row=2, column=1, padx=10, pady=5)
+    if row_index < len(optionRiskAmount):
+        risk_entry.insert(0, optionRiskAmount[row_index].get())
+    else:
+        expire_combo.set("0")
     
     # Entry Order Type
-    Label(modal, text="Entry Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=2, column=0, sticky="w", padx=10, pady=5)
+    Label(modal, text="Entry Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=3, column=0, sticky="w", padx=10, pady=5)
     entry_order_combo = ttk.Combobox(modal, state="readonly", width=12, values=Config.optionOrderTypes)
-    entry_order_combo.grid(row=2, column=1, padx=10, pady=5)
+    entry_order_combo.grid(row=3, column=1, padx=10, pady=5)
     if row_index < len(optionEntryOrderType):
         current_value = optionEntryOrderType[row_index].get()
         if current_value in Config.optionOrderTypes:
@@ -707,9 +741,9 @@ def _show_option_config_modal(row_index):
             entry_order_combo.current(0)
     
     # Stop Loss Order Type
-    Label(modal, text="Stop Loss Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=3, column=0, sticky="w", padx=10, pady=5)
+    Label(modal, text="Stop Loss Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=4, column=0, sticky="w", padx=10, pady=5)
     sl_order_combo = ttk.Combobox(modal, state="readonly", width=12, values=Config.optionOrderTypes)
-    sl_order_combo.grid(row=3, column=1, padx=10, pady=5)
+    sl_order_combo.grid(row=4, column=1, padx=10, pady=5)
     if row_index < len(optionStopLossOrderType):
         current_value = optionStopLossOrderType[row_index].get()
         if current_value in Config.optionOrderTypes:
@@ -718,9 +752,9 @@ def _show_option_config_modal(row_index):
             sl_order_combo.current(0)
     
     # Profit Order Type
-    Label(modal, text="Profit Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=4, column=0, sticky="w", padx=10, pady=5)
+    Label(modal, text="Profit Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=5, column=0, sticky="w", padx=10, pady=5)
     profit_order_combo = ttk.Combobox(modal, state="readonly", width=12, values=Config.optionOrderTypes)
-    profit_order_combo.grid(row=4, column=1, padx=10, pady=5)
+    profit_order_combo.grid(row=5, column=1, padx=10, pady=5)
     if row_index < len(optionProfitOrderType):
         current_value = optionProfitOrderType[row_index].get()
         if current_value in Config.optionOrderTypes:
@@ -730,38 +764,35 @@ def _show_option_config_modal(row_index):
     
     # Info label
     info_text = "Bid+: Start with bid, increase 5 cents until fill\nAsk-: Start with ask, decrease 5 cents until fill"
-    Label(modal, text=info_text, font=(Config.fontName2, 9), justify=LEFT).grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=10)
+    Label(modal, text=info_text, font=(Config.fontName2, 9), justify=LEFT).grid(row=6, column=0, columnspan=2, sticky="w", padx=10, pady=10)
     
     # Buttons frame
     button_frame = Frame(modal)
-    button_frame.grid(row=6, column=0, columnspan=2, pady=10)
+    button_frame.grid(row=7, column=0, columnspan=2, pady=10)
     
     def save_option_config():
         try:
-            # Validate and save contract (strike price)
-            contract_val = contract_entry.get().strip()
-            if contract_val:
-                float(contract_val)  # Validate it's a number
-                if row_index < len(optionContract):
-                    optionContract[row_index].set(contract_val)
-            else:
-                if row_index < len(optionContract):
-                    optionContract[row_index].set("")
+            # Save contract selection as internal code
+            selected_strike = contract_combo.get()
+            strike_map_reverse = {
+                "ATM": "ATM",
+                "OTM 1": "OTM1",
+                "OTM 2": "OTM2",
+                "OTM 3": "OTM3",
+            }
+            internal_strike = strike_map_reverse.get(selected_strike, "ATM")
+            if row_index < len(optionContract):
+                optionContract[row_index].set(internal_strike)
             
-            # Validate and save expiration
-            expire_val = expire_entry.get().strip()
-            if expire_val:
-                # Validate format YYYYMMDD
-                if len(expire_val) == 8 and expire_val.isdigit():
-                    if row_index < len(optionExpire):
-                        optionExpire[row_index].set(expire_val)
-                else:
-                    tkinter.messagebox.showerror("Invalid Input", "Expiration must be in YYYYMMDD format (e.g., 20260119)")
-                    expire_entry.focus()
-                    return
-            else:
-                if row_index < len(optionExpire):
-                    optionExpire[row_index].set("")
+            # Save expiration selection (weeks out)
+            expire_val = expire_combo.get().strip()
+            if row_index < len(optionExpire):
+                optionExpire[row_index].set(expire_val or "0")
+
+            # Save risk amount (optional)
+            risk_val = risk_entry.get().strip()
+            if row_index < len(optionRiskAmount):
+                optionRiskAmount[row_index].set(risk_val)
             
             # Save order types
             if row_index < len(optionEntryOrderType):
@@ -786,9 +817,10 @@ def _show_option_config_modal(row_index):
     Button(button_frame, text="Cancel", width=8, command=cancel_option_config).pack(side=LEFT, padx=5)
     
     # Bind Enter key to save
-    contract_entry.bind("<Return>", lambda e: save_option_config())
-    expire_entry.bind("<Return>", lambda e: save_option_config())
-    contract_entry.focus()
+    contract_combo.bind("<Return>", lambda e: save_option_config())
+    expire_combo.bind("<Return>", lambda e: save_option_config())
+    risk_entry.bind("<Return>", lambda e: save_option_config())
+    contract_combo.focus()
 
 def cancel_row(row_index):
     async_task = row_async_tasks[row_index]
@@ -1097,11 +1129,12 @@ def addField(rowYPosition, initial_status_text=""):
                                   command=lambda idx=row_index_for_option: _toggle_option_fields(idx))
     optionCheckbox.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
     optionEnabled.append(False)  # Initialize option as disabled
-    optionContract.append(StringVar(field, ""))  # Store contract (strike price)
-    optionExpire.append(StringVar(field, ""))  # Store expiration date
+    optionContract.append(StringVar(field, ""))  # Store contract (strike selection code)
+    optionExpire.append(StringVar(field, ""))  # Store expiration selection
     optionEntryOrderType.append(StringVar(field, "Market"))  # Default entry order type
     optionStopLossOrderType.append(StringVar(field, "Market"))  # Default stop loss order type
     optionProfitOrderType.append(StringVar(field, "Market"))  # Default profit order type
+    optionRiskAmount.append(StringVar(field, ""))  # Default risk amount (blank = use share quantity)
     
     # 13) STATUS (column 12)
     statusVar = StringVar(field)

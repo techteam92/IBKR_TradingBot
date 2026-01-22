@@ -2255,6 +2255,16 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                          timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
             
+            # Store TP/SL prices in entry order's orderStatusData for option trading
+            entry_order_id = int(entry_response.order.orderId)
+            if entry_order_id in Config.orderStatusData:
+                Config.orderStatusData[entry_order_id]['tp_price'] = tp_price
+                Config.orderStatusData[entry_order_id]['stop_loss_price'] = stop_loss_price
+                Config.orderStatusData[entry_order_id]['tp_order_id'] = int(tp_response.order.orderId)
+                Config.orderStatusData[entry_order_id]['sl_order_id'] = int(sl_response.order.orderId)
+                logging.info("RTH Stop Order: Stored TP/SL prices in entry orderStatusData: entry=%s, tp=%s, sl=%s", 
+                            entry_order_id, tp_price, stop_loss_price)
+            
             logging.info("Regular market: Bracket orders placed for %s: trigger=%s, tp=%s, sl=%s, quantity=%s", 
                          symbol, entry_price, tp_price, stop_loss_price, qty)
             
@@ -2697,6 +2707,18 @@ async def rbb_loop_run(connection,key,entry_order):
                         Config.orderStatusData.update({ order.orderId:d })
                         old_order = d  # Update old_order for next iteration
                         logging.info("RBBB: Updated orderStatusData with new bar data (datetime=%s) for continuous entry order updates", histData.get('dateTime'))
+                        
+                        # Update option orders if option trading is enabled for this RBB trade
+                        try:
+                            from OptionTrading import updateOptionOrdersForRBB
+                            # Calculate new stop loss price for option update
+                            new_sl_price = None
+                            if 'stop_loss_price' in d:
+                                new_sl_price = d['stop_loss_price']
+                            # Update option entry order to match new stock entry price
+                            updateOptionOrdersForRBB(connection, order.orderId, round(aux_price, Config.roundVal), new_sl_price)
+                        except Exception as e:
+                            logging.error("RBBB: Error updating option orders: %s", e)
             else:
                 break
 
@@ -4867,14 +4889,14 @@ def _get_lod_hod_for_stop_loss(connection, contract, timeFrame):
     logging.warning("No historical data available for HOD/LOD calculation")
     return None, None, {}
 
-async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points, option_enabled=False, option_contract="", option_expire="", option_entry_order_type="Market", option_sl_order_type="Market", option_tp_order_type="Market"):
+async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points, option_enabled=False, option_contract="", option_expire="", option_entry_order_type="Market", option_sl_order_type="Market", option_tp_order_type="Market", option_risk_amount=""):
     try:
         symbol=symbol.upper()
         if entry_points == "":
             entry_points = 0
-        logging.info("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s option_enabled=%s option_contract=%s option_expire=%s",  
+        logging.info("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s option_enabled=%s option_contract=%s option_expire=%s option_risk_amount=%s",  
                     symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points,
-                    option_enabled, option_contract, option_expire)
+                    option_enabled, option_contract, option_expire, option_risk_amount)
         logging.info("SendTrade: barType='%s', Config.entryTradeType=%s", barType, Config.entryTradeType)
         logging.info("SendTrade: Checking routing - barType='%s', entryTradeType[6]='%s'", barType, Config.entryTradeType[6] if len(Config.entryTradeType) > 6 else "N/A")
 
@@ -4914,6 +4936,27 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             # If outsideRth is False but we're in an extended hours session, warn
             if session in ('PREMARKET', 'AFTERHOURS', 'OVERNIGHT'):
                 logging.warning("Session is %s but outsideRth=False. Consider setting outsideRth=True for extended hours trading.", session)
+        # Handle option trading if enabled (BEFORE routing to avoid early returns)
+        # Note: Option orders will be placed after the stock entry order fills
+        # The option parameters are stored and will be used in StatusUpdate when entry fills
+        # Note: option_expire can be 0 (current week), so check for not None/empty string instead of truthiness
+        if option_enabled and option_contract and (option_expire is not None and option_expire != ""):
+            logging.info("Option trading enabled for %s: contract=%s, expire=%s, entry_order_type=%s, sl_order_type=%s, tp_order_type=%s, risk_amount=%s", 
+                        symbol, option_contract, option_expire, option_entry_order_type, option_sl_order_type, option_tp_order_type, option_risk_amount)
+            # Store option parameters in Config for later use when entry fills
+            trade_key = (symbol, timeFrame, barType, buySellType, datetime.datetime.now().timestamp())
+            Config.option_trade_params = Config.option_trade_params if hasattr(Config, 'option_trade_params') else {}
+            Config.option_trade_params[trade_key] = {
+                'enabled': True,
+                'contract': option_contract,
+                'expire': option_expire,
+                'entry_order_type': option_entry_order_type,
+                'sl_order_type': option_sl_order_type,
+                'tp_order_type': option_tp_order_type,
+                'risk_amount': option_risk_amount,
+            }
+            logging.info("Option trading parameters stored for trade key: %s", trade_key)
+
         if barType == 'Limit Order':
             logging.info("Routing to manual_limit_order for barType='%s'", barType)
             await manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
@@ -4953,25 +4996,6 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             logging.info("Routing to lb3 for barType='%s' (Config.entryTradeType[10]='%s')", barType, Config.entryTradeType[10])
             await (lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
-
-        # Handle option trading if enabled
-        # Note: Option orders will be placed after the stock entry order fills
-        # The option parameters are stored and will be used in StatusUpdate when entry fills
-        if option_enabled and option_contract and option_expire:
-            logging.info("Option trading enabled for %s: contract=%s, expire=%s, entry_order_type=%s, sl_order_type=%s, tp_order_type=%s", 
-                        symbol, option_contract, option_expire, option_entry_order_type, option_sl_order_type, option_tp_order_type)
-            # Store option parameters in Config for later use when entry fills
-            trade_key = (symbol, timeFrame, barType, buySellType, datetime.datetime.now().timestamp())
-            Config.option_trade_params = Config.option_trade_params if hasattr(Config, 'option_trade_params') else {}
-            Config.option_trade_params[trade_key] = {
-                'enabled': True,
-                'contract': option_contract,
-                'expire': option_expire,
-                'entry_order_type': option_entry_order_type,
-                'sl_order_type': option_sl_order_type,
-                'tp_order_type': option_tp_order_type
-            }
-            logging.info("Option trading parameters stored for trade key: %s", trade_key)
 
         logging.info("task done for %s symbol",symbol)
 
