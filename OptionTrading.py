@@ -202,8 +202,8 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         logging.info("Option entry: Using exact entry_price=%.2f for conditional order (current_price=%.2f)", 
                     entry_price, current_stock_price)
         
-        # Create entry order
-        order_id = connection.get_next_order_id()
+        # Create entry order (using OptionEntry trade type for unique ID range)
+        order_id = connection.get_next_order_id('OptionEntry')
         order = Order()
         order.orderId = order_id
         order.action = action
@@ -797,8 +797,8 @@ async def placeOptionEntryOrderFromPending(connection, pending_key, entry_price,
         buy_sell_type = params['buy_sell_type']
         stock_entry_order_id = params['stock_entry_order_id']
         
-        # Create entry order
-        order_id = connection.get_next_order_id()
+        # Create entry order (using OptionEntry trade type for unique ID range)
+        order_id = connection.get_next_order_id('OptionEntry')
         order = Order()
         order.orderId = order_id
         order.action = action
@@ -1095,8 +1095,9 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
         logging.info("Option %s: Using exact condition_price=%.2f for conditional order (current_price=%.2f)", 
                     ord_type_name, condition_price, current_stock_price)
         
-        # Create and place the conditional order
-        order_id = connection.get_next_order_id()
+        # Create and place the conditional order (using OptionStopLoss or OptionProfit trade type)
+        trade_type = 'OptionStopLoss' if ord_type_name == 'StopLoss' else 'OptionProfit'
+        order_id = connection.get_next_order_id(trade_type)
         order = Order()
         order.orderId = order_id
         order.action = action
