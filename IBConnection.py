@@ -131,23 +131,57 @@ class connection:
                             trade.order.orderId, trade.orderStatus.status, ord_type, bar_type)
                 
                 if ord_type == 'Entry':
-                    # For Entry orders: Trigger option orders when order is placed (PreSubmitted/Submitted) or filled
-                    # This ensures option orders are placed immediately when stock order is submitted
+                    # For Entry orders: 
+                    # When placed (PreSubmitted/Submitted): Place option entry order immediately
+                    # Option entry order triggers when stock price crosses entry price (not waiting for stock order to fill)
                     if trade.orderStatus.status in ('PreSubmitted', 'Submitted'):
-                        logging.info("orderStatusEvent: Entry order PLACED (status=%s) - calling handleOptionTradingForEntryFill for orderId=%s", 
-                                    trade.orderStatus.status, trade.order.orderId)
-                        from OptionTrading import handleOptionTradingForEntryFill
-                        handleOptionTradingForEntryFill(self, trade.order.orderId, data)
-                    elif trade.orderStatus.status == 'Filled':
-                        # Also handle fills in case option orders weren't placed earlier
-                        logging.info("orderStatusEvent: Entry order FILLED - calling handleOptionTradingForEntryFill for orderId=%s", 
-                                    trade.order.orderId)
-                        from OptionTrading import handleOptionTradingForEntryFill
-                        handleOptionTradingForEntryFill(self, trade.order.orderId, data)
+                        # Check if option trading is enabled for this trade
+                        if hasattr(Config, 'option_trade_params') and Config.option_trade_params:
+                            symbol = data.get('usersymbol')
+                            timeFrame = data.get('timeFrame')
+                            barType = data.get('barType')
+                            buySellType = data.get('userBuySell') or data.get('action')
+                            
+                            # Find matching option params
+                            matching_params = None
+                            matching_key = None
+                            for trade_key, params in list(Config.option_trade_params.items()):
+                                if len(trade_key) >= 5:
+                                    key_symbol, key_tf, key_bar, key_side, ts = trade_key
+                                    if (key_symbol == symbol and key_tf == timeFrame and 
+                                        key_bar == barType and key_side == buySellType):
+                                        matching_params = params
+                                        matching_key = trade_key
+                                        break
+                            
+                            if matching_params and matching_params.get('enabled'):
+                                logging.info("orderStatusEvent: Entry order placed - placing option entry order immediately for orderId=%s", 
+                                            trade.order.orderId)
+                                from OptionTrading import placeOptionEntryOrderImmediately
+                                import asyncio
+                                # Get entry, stop loss, and profit prices from orderStatusData
+                                entry_data = Config.orderStatusData.get(trade.order.orderId, {})
+                                entry_price = entry_data.get('lastPrice') or entry_data.get('auxPrice') or entry_data.get('entryPrice')
+                                stop_loss_price = entry_data.get('stop_loss_price') or entry_data.get('stopLossPrice')
+                                profit_price = entry_data.get('tp_price') or entry_data.get('profit_price')
+                                
+                                if entry_price and stop_loss_price and profit_price:
+                                    # Remove from option_trade_params since we're placing it now
+                                    if matching_key in Config.option_trade_params:
+                                        del Config.option_trade_params[matching_key]
+                                    asyncio.ensure_future(
+                                        placeOptionEntryOrderImmediately(
+                                            self, trade.order.orderId, symbol, entry_price, stop_loss_price, profit_price,
+                                            matching_params, buySellType, entry_data
+                                        )
+                                    )
+                                else:
+                                    logging.warning("orderStatusEvent: Cannot place option entry order - missing prices: entry=%s, sl=%s, tp=%s", 
+                                                   entry_price, stop_loss_price, profit_price)
                 elif ord_type == 'OptionEntry' and trade.orderStatus.status == 'Filled':
-                    # When option entry order fills, place stop loss and take profit orders
-                    # This avoids Error 201 (cannot have both BUY and SELL orders open)
-                    logging.info("orderStatusEvent: Option entry order FILLED - calling handleOptionEntryFill for orderId=%s", 
+                    # When option entry order fills, place stop loss and take profit orders immediately
+                    # These orders trigger when stock price reaches stop loss or take profit (not waiting for stock orders to fill)
+                    logging.info("orderStatusEvent: Option entry order FILLED - placing option stop loss and take profit orders for orderId=%s", 
                                 trade.order.orderId)
                     from OptionTrading import handleOptionEntryFill
                     handleOptionEntryFill(self, trade.order.orderId)
@@ -157,12 +191,9 @@ class connection:
                                 ord_type, trade.order.orderId)
                     from OptionTrading import handleOptionTpSlFill
                     handleOptionTpSlFill(self, trade.order.orderId, ord_type)
-                elif trade.orderStatus.status == 'Filled':
-                    # For StopLoss/TakeProfit fills: Trigger corresponding option orders
-                    logging.info("orderStatusEvent: TP/SL order FILLED - calling triggerOptionOrderOnStockFill for orderId=%s", 
-                                trade.order.orderId)
-                    from OptionTrading import triggerOptionOrderOnStockFill
-                    triggerOptionOrderOnStockFill(self, trade.order.orderId, ord_type, bar_type)
+                # Note: We no longer trigger option orders when stock stop loss/take profit fill
+                # Option stop loss and take profit orders are placed immediately when option entry fills
+                # They trigger based on stock price movements, not stock order fills
             except Exception as e:
                 logging.error("orderStatusEvent: Error in option order trigger for orderId=%s: %s", trade.order.orderId, e)
                 logging.error(traceback.format_exc())
