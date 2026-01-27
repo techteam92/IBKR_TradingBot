@@ -127,11 +127,12 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
             try:
                 risk_amt = float(risk_amount)
                 if risk_amt > 0:
-                    # quantity = risk_amount / (contract_price * 100), rounded up
-                    option_quantity = int(math.ceil(risk_amt / (opt_price * 100)))
+                    # quantity = risk_amount / (contract_price * 100), rounded to nearest integer
+                    # Use round() instead of ceil() to avoid buying too many contracts
+                    option_quantity = int(round(risk_amt / (opt_price * 100)))
                     if option_quantity <= 0:
                         option_quantity = 1
-                    logging.info("Option quantity calculated: risk=%s, opt_price=%s, quantity=%s", risk_amt, opt_price, option_quantity)
+                    logging.info("Option quantity calculated: risk=%s, opt_price=%s, quantity=%s (rounded)", risk_amt, opt_price, option_quantity)
             except (ValueError, TypeError):
                 logging.warning("Invalid risk amount: %s, using quantity=1", risk_amount)
         
