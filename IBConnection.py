@@ -174,9 +174,22 @@ class connection:
                                 if retry_response:
                                     logging.info(f"Successfully retried entry order with new order ID: {new_order_id}")
                                     
-                                    # For Custom and Limit Order types, regenerate bracket orders (TP/SL) with new parent ID
-                                    if bar_type in ['Custom', 'Limit Order']:
+                                    # For bracket order types (Custom, Limit Order, Conditional Order, FB, RB, RBB, PBe1, PBe2, LB, LB2, LB3), 
+                                    # regenerate bracket orders (TP/SL) with new parent ID
+                                    # These trade types use bracket orders and need TP/SL regeneration after Error 103 retry
+                                    bracket_order_types = ['Custom', 'Limit Order', 'Conditional Order', 'FB', 'RB', 'RBB', 'PBe1', 'PBe2', 'LB', 'LB2', 'LB3']
+                                    if bar_type in bracket_order_types:
                                         try:
+                                            # For Conditional Order in extended hours, we do NOT use bracket orders
+                                            # (TP/SL are placed later by sendTpAndSl). Skip regeneration in that case.
+                                            if bar_type == 'Conditional Order' and order_data.get('outsideRth', False):
+                                                logging.info(
+                                                    "Skipping bracket regeneration for Conditional Order %s in extended hours "
+                                                    "(outsideRth=True). TP/SL will be handled by sendTpAndSl.",
+                                                    new_order_id,
+                                                )
+                                                return
+                                            
                                             # Get TP/SL prices from orderStatusData
                                             tp_price = order_data.get('tp_price')
                                             stop_loss_price = order_data.get('stop_loss_price')
@@ -203,16 +216,23 @@ class connection:
                                                     transmit=False
                                                 )
                                                 
-                                                # Stop Loss order
+                                                # Stop Loss order - check if it should be STP LMT (for extended hours)
+                                                sl_order_type = order_data.get('stop_order_type', 'STP')  # Default to STP for regular hours
                                                 sl_order = Order(
                                                     orderId=sl_order_id,
-                                                    orderType="STP",
+                                                    orderType=sl_order_type,
                                                     action="SELL" if buy_sell_type == "BUY" else "BUY",
                                                     totalQuantity=qty,
                                                     auxPrice=stop_loss_price,
                                                     parentId=new_order_id,
                                                     transmit=True  # Last order transmits entire bracket
                                                 )
+                                                # If STP LMT, set the limit price
+                                                if sl_order_type == 'STP LMT':
+                                                    sl_limit_price = order_data.get('stop_limit_price')
+                                                    if sl_limit_price:
+                                                        sl_order.lmtPrice = sl_limit_price
+                                                        logging.info(f"Regenerated SL order (STP LMT): limit_price={sl_limit_price}")
                                                 
                                                 # Place bracket orders
                                                 tp_response = self.placeTrade(contract=contract, order=tp_order, outsideRth=outside_rth, trade_type='TakeProfit')
@@ -1207,13 +1227,18 @@ class connection:
         return historical
 
     def BracketOrder(self,parentOrderId, action, quantity, limitPrice, takeProfitLimitPrice, stopLossPrice):
+        """
+        Create a bracket order (parent, TP, SL) for OCA group.
+        NOTE: For proper bracket order behavior, only the LAST order (stopLoss) should have transmit=True.
+        The parent and takeProfit orders should have transmit=False.
+        """
         parent = Order()
         parent.orderId = parentOrderId
         parent.action = action
-        parent.orderType = "MKT"
+        parent.orderType = "MKT"  # NOTE: This should be configurable based on order type (STP, LMT, etc.)
         parent.totalQuantity = quantity
         parent.lmtPrice = limitPrice
-        parent.transmit = True
+        parent.transmit = False  # Entry order should NOT transmit - only last order transmits
 
         takeProfit = Order()
         takeProfit.orderId = parent.orderId + 1
@@ -1222,7 +1247,7 @@ class connection:
         takeProfit.totalQuantity = quantity
         takeProfit.lmtPrice = takeProfitLimitPrice
         takeProfit.parentId = parentOrderId
-        takeProfit.transmit = True
+        takeProfit.transmit = False  # TP order should NOT transmit - only last order transmits
 
         stopLoss = Order()
         stopLoss.orderId = parent.orderId + 2
@@ -1231,7 +1256,7 @@ class connection:
         stopLoss.auxPrice = stopLossPrice
         stopLoss.totalQuantity = quantity
         stopLoss.parentId = parentOrderId
-        stopLoss.transmit = True
+        stopLoss.transmit = True  # Only the LAST order should transmit to send the entire bracket group
         bracketOrder = [parent, takeProfit, stopLoss]
         return bracketOrder
 

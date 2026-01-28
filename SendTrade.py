@@ -5344,6 +5344,38 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
         if barType == Config.entryTradeType[3]:  # FB
             tp,sl = TpSlForFB(connection,ibcontract,tradeType,quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk,tif,barType,userBuySell,userAtr,slValue,breakEven,outsideRth)
             logging.info(f"tp %s sl %s found for ,ibcontract %s ,tradeType %s ,quantity %s ,histData %s ,lastPrice %s , symbol %s ,timeFrame %s ,profit %s ,stopLoss %s ,risk %s ,tif %s ,barType %s ,userBuySell %s ,userAtr %s ,slValue %s ,breakEven %s ,outsideRth %s ",tp,sl ,ibcontract,tradeType,quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk,tif,barType,userBuySell,userAtr,slValue,breakEven,outsideRth )
+            
+            # For stop orders, add a safety buffer to TP to account for potential slippage
+            # Stop orders can fill significantly above/below the trigger price
+            # Calculate stop_size to determine appropriate buffer (use ATR if available, otherwise bar-based)
+            try:
+                # Use ATR stop_size if stopLoss is ATR-based, otherwise use bar-based
+                if stopLoss in Config.atrStopLossMap:
+                    atr_offset = _get_atr_stop_offset(connection, ibcontract, stopLoss)
+                    if atr_offset is not None and atr_offset > 0:
+                        stop_size = atr_offset
+                    else:
+                        stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                else:
+                    stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+                
+                # Add a slippage buffer: 0.5 * stop_size to account for typical stop order slippage
+                slippage_buffer = round(stop_size * 0.5, Config.roundVal)
+                if tradeType == 'BUY':
+                    # For BUY: ensure TP is at least slippage_buffer above the trigger price
+                    min_tp = round(lastPrice + slippage_buffer, Config.roundVal)
+                    if tp < min_tp:
+                        logging.warning(f"FB TP adjustment: Original TP={tp} is below minimum (trigger={lastPrice} + buffer={slippage_buffer} = {min_tp}). Adjusting TP to {min_tp} to account for stop order slippage.")
+                        tp = min_tp
+                else:  # SELL
+                    # For SELL: ensure TP is at least slippage_buffer below the trigger price
+                    max_tp = round(lastPrice - slippage_buffer, Config.roundVal)
+                    if tp > max_tp:
+                        logging.warning(f"FB TP adjustment: Original TP={tp} is above maximum (trigger={lastPrice} - buffer={slippage_buffer} = {max_tp}). Adjusting TP to {max_tp} to account for stop order slippage.")
+                        tp = max_tp
+            except Exception as e:
+                logging.warning(f"Could not calculate slippage buffer for FB TP: {e}. Using original TP={tp}")
+            
             parentOrderId = random.randint(3, 500)+int(datetime.datetime.now().time().hour)+int(datetime.datetime.now().time().minute)+int(datetime.datetime.now().time().second)+int(datetime.datetime.now().time().microsecond)
             br_order = connection.ib.bracketOrder( userBuySell, quantity, tp, tp, sl)
             logging.info(f"bracket order ------------------  %s ",br_order)
@@ -5361,13 +5393,17 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
                 auxPrice=round(lastPrice, Config.roundVal),
                 totalQuantity=ord.totalQuantity,
                 action=ord.action,
-                transmit=True
+                transmit=False  # Entry order should NOT transmit - only the last order (SL) should transmit
             )
             stop_order = br_order[2]
             stop_order_type = 'STP'
             stop_order.auxPrice = round(sl, Config.roundVal)
             stop_order.orderType = 'STP'
             stop_order.lmtPrice = getattr(stop_order, "lmtPrice", 0.0)
+            # Ensure TP order also has transmit=False (should already be set by bracketOrder, but verify)
+            br_order[1].transmit = False
+            # Ensure SL order has transmit=True (last order in bracket transmits the entire group)
+            stop_order.transmit = True
 
             if is_extended:
                 # For Custom stop loss in extended hours: Calculate entry price from bar high/low
@@ -5453,16 +5489,35 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
             StatusUpdate(entry_res, 'Entry', ibcontract, entry_order_type, tradeType, quantity, histData, lastPrice, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, userBuySell, userAtr, slValue,
                          breakEven, outsideRth, False, entry_points)
-            res = connection.placeTrade(contract=ibcontract, order=br_order[1], outsideRth=outsideRth)
-            logging.info(f"response of  bracket order second %s   contract %s", res, ibcontract)
-            StatusUpdate(res, 'TakeProfit', ibcontract, 'LMT', tradeType, quantity, histData, lastPrice, symbol,
+            
+            # Store TP/SL prices and order type info in orderStatusData for bracket order regeneration if Error 103 occurs
+            entry_order_id = int(entry_res.order.orderId)
+            if entry_order_id in Config.orderStatusData:
+                Config.orderStatusData[entry_order_id]['tp_price'] = tp
+                Config.orderStatusData[entry_order_id]['stop_loss_price'] = sl
+                Config.orderStatusData[entry_order_id]['stop_order_type'] = stop_order_type  # Store 'STP' or 'STP LMT'
+                if stop_order_type == 'STP LMT' and hasattr(stop_order, 'lmtPrice'):
+                    Config.orderStatusData[entry_order_id]['stop_limit_price'] = stop_order.lmtPrice
+                logging.info(f"FB: Stored TP/SL prices and order type in orderStatusData: tp={tp}, sl={sl}, stop_order_type={stop_order_type} for orderId={entry_order_id}")
+            
+            tp_res = connection.placeTrade(contract=ibcontract, order=br_order[1], outsideRth=outsideRth)
+            logging.info(f"response of  bracket order second %s   contract %s", tp_res, ibcontract)
+            StatusUpdate(tp_res, 'TakeProfit', ibcontract, 'LMT', tradeType, quantity, histData, lastPrice, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, userBuySell, userAtr, slValue,
                          breakEven, outsideRth)
-            res = connection.placeTrade(contract=ibcontract, order=br_order[2], outsideRth=outsideRth)
-            logging.info(f"response of  bracket order third %s   contract %s", res, ibcontract)
-            StatusUpdate(res, 'StopLoss', ibcontract, stop_order_type, tradeType, quantity, histData, lastPrice, symbol,
+            sl_res = connection.placeTrade(contract=ibcontract, order=br_order[2], outsideRth=outsideRth)
+            logging.info(f"response of  bracket order third %s   contract %s", sl_res, ibcontract)
+            StatusUpdate(sl_res, 'StopLoss', ibcontract, stop_order_type, tradeType, quantity, histData, lastPrice, symbol,
                          timeFrame, profit, stopLoss, risk,Config.orderStatusData.get(int(entry_res.order.orderId)), tif, barType, userBuySell, userAtr, slValue,
                          breakEven, outsideRth)
+            
+            # Store TP/SL order IDs in orderStatusData for potential future updates
+            if entry_order_id in Config.orderStatusData:
+                if tp_res and tp_res.order:
+                    Config.orderStatusData[entry_order_id]['tp_order_id'] = int(tp_res.order.orderId)
+                if sl_res and sl_res.order:
+                    Config.orderStatusData[entry_order_id]['sl_order_id'] = int(sl_res.order.orderId)
+                logging.info(f"FB: Stored TP/SL order IDs in orderStatusData: tp_order_id={Config.orderStatusData[entry_order_id].get('tp_order_id')}, sl_order_id={Config.orderStatusData[entry_order_id].get('sl_order_id')}")
 
         elif barType == Config.entryTradeType[1] or barType == Config.entryTradeType[2]:
             # RB and RBB implementation - place market order
@@ -5748,15 +5803,33 @@ def sendEntryTrade(connection,ibcontract,tradeType,quantity,histData,lastPrice, 
         print(e)
         return None
 
-def get_tp_for_selling(connection, timeFrame, contract, profit_type, filled_price, histData):
+def get_tp_for_selling(connection, timeFrame, contract, profit_type, filled_price, histData, stopLoss=None):
     # Take-profit levels for long positions (sell orders) use the configured stop size.
+    # Note: filled_price parameter is actually the entry stop order price (stop entry price/trigger price), not the actual fill price
     stop_size = None
-    try:
-        stop_size, _, _ = _calculate_stop_limit_offsets(histData)
-    except Exception:
-        high = float(histData['high'])
-        low = float(histData['low'])
-        stop_size = round((high - low) + Config.add002, Config.roundVal)
+    
+    # For ATR stop loss, use ATR stop_size instead of bar-based stop_size
+    if stopLoss and stopLoss in Config.atrStopLossMap:
+        atr_offset = _get_atr_stop_offset(connection, contract, stopLoss)
+        if atr_offset is not None and atr_offset > 0:
+            stop_size = atr_offset
+            logging.info(f"get_tp_for_selling: Using ATR stop_size={stop_size} for TP calculation (stopLoss={stopLoss})")
+        else:
+            logging.warning(f"get_tp_for_selling: ATR unavailable for {stopLoss}, falling back to bar-based stop_size")
+            try:
+                stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+            except Exception:
+                high = float(histData['high'])
+                low = float(histData['low'])
+                stop_size = round((high - low) + Config.add002, Config.roundVal)
+    else:
+        # For non-ATR stop loss, use bar-based stop_size
+        try:
+            stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+        except Exception:
+            high = float(histData['high'])
+            low = float(histData['low'])
+            stop_size = round((high - low) + Config.add002, Config.roundVal)
 
     multiplier_map = {
         Config.takeProfit[0]: 1,    # 1:1
@@ -5770,6 +5843,8 @@ def get_tp_for_selling(connection, timeFrame, contract, profit_type, filled_pric
 
     multiplier = multiplier_map.get(profit_type)
     if multiplier is not None:
+        # Take Profit = stop entry price + multiplier * stop size (for BUY, TP is above entry)
+        # stop entry price = entry stop order trigger price (auxPrice), not the actual fill price
         price = float(filled_price) + (multiplier * stop_size)
     else:
         # Bar-by-bar logic
@@ -5777,21 +5852,39 @@ def get_tp_for_selling(connection, timeFrame, contract, profit_type, filled_pric
 
     price = round(price, Config.roundVal)
     logging.info(
-        f"tp calculation for selling %s , price %s histData %s filled_price %s profit_type %s stop_size %s multiplier %s ",
+        f"tp calculation for selling (BUY trade) %s , price %s histData %s stop_entry_price %s profit_type %s stop_size %s multiplier %s (formula: stop_entry_price + multiplier * stop_size)",
         contract, price, histData, filled_price, profit_type, stop_size, multiplier,
     )
     return price
 
 
-def get_tp_for_buying(connection, timeFrame, contract, profit_type, filled_price, histData):
+def get_tp_for_buying(connection, timeFrame, contract, profit_type, filled_price, histData, stopLoss=None):
     # Take-profit levels for short positions (buy orders) use the configured stop size.
+    # Note: filled_price parameter is actually the entry stop order price (stop entry price/trigger price), not the actual fill price
     stop_size = None
-    try:
-        stop_size, _, _ = _calculate_stop_limit_offsets(histData)
-    except Exception:
-        high = float(histData['high'])
-        low = float(histData['low'])
-        stop_size = round((high - low) + Config.add002, Config.roundVal)
+    
+    # For ATR stop loss, use ATR stop_size instead of bar-based stop_size
+    if stopLoss and stopLoss in Config.atrStopLossMap:
+        atr_offset = _get_atr_stop_offset(connection, contract, stopLoss)
+        if atr_offset is not None and atr_offset > 0:
+            stop_size = atr_offset
+            logging.info(f"get_tp_for_buying: Using ATR stop_size={stop_size} for TP calculation (stopLoss={stopLoss})")
+        else:
+            logging.warning(f"get_tp_for_buying: ATR unavailable for {stopLoss}, falling back to bar-based stop_size")
+            try:
+                stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+            except Exception:
+                high = float(histData['high'])
+                low = float(histData['low'])
+                stop_size = round((high - low) + Config.add002, Config.roundVal)
+    else:
+        # For non-ATR stop loss, use bar-based stop_size
+        try:
+            stop_size, _, _ = _calculate_stop_limit_offsets(histData)
+        except Exception:
+            high = float(histData['high'])
+            low = float(histData['low'])
+            stop_size = round((high - low) + Config.add002, Config.roundVal)
 
     multiplier_map = {
         Config.takeProfit[0]: 1,    # 1:1
@@ -5805,24 +5898,30 @@ def get_tp_for_buying(connection, timeFrame, contract, profit_type, filled_price
 
     multiplier = multiplier_map.get(profit_type)
     if multiplier is not None:
+        # Take Profit = stop entry price - multiplier * stop size (for SELL, TP is below entry)
+        # stop entry price = entry stop order trigger price (auxPrice), not the actual fill price
         price = float(filled_price) - (multiplier * stop_size)
     else:
         price = float(filled_price) - (1 * stop_size)
 
     price = round(price, Config.roundVal)
     logging.info(
-        f"tp calculation for buying %s , price %s histData %s filled_price %s profit_type %s stop_size %s multiplier %s ",
+        f"tp calculation for buying (SELL trade) %s , price %s histData %s stop_entry_price %s profit_type %s stop_size %s multiplier %s (formula: stop_entry_price - multiplier * stop_size)",
         contract, price, histData, filled_price, profit_type, stop_size, multiplier,
     )
     return price
 
 def get_sl_for_selling(connection,stoploss_type,filled_price, histData,slValue ,contract,timeframe,chartTime):
     # we are sending sell sl order bcz entry buy
+    # Note: filled_price parameter is actually the entry stop order price (stop entry price/trigger price), not the actual fill price
+    # For BUY: Stop Loss = stop entry price - stop size
     if stoploss_type in Config.atrStopLossMap:
         atr_offset = _get_atr_stop_offset(connection, contract, stoploss_type)
         if atr_offset is not None:
+            # Stop Loss = stop entry price - stop size (for BUY, SL is below entry)
+            # stop entry price = entry stop order trigger price (auxPrice), not the actual fill price
             stpPrice = float(filled_price) - atr_offset
-            logging.info("ATR stop loss (long) %s offset %s filled_price %s stop %s",
+            logging.info("ATR stop loss (long) %s offset %s stop_entry_price %s stop %s (formula: stop_entry_price - stop_size)",
                          stoploss_type, atr_offset, filled_price, stpPrice)
             stpPrice = round(stpPrice, Config.roundVal)
             return stpPrice
@@ -5909,12 +6008,16 @@ def get_sl_for_selling(connection,stoploss_type,filled_price, histData,slValue ,
     stpPrice = round(stpPrice, Config.roundVal)
     return stpPrice
 def get_sl_for_buying(connection,stoploss_type,filled_price, histData,slValue ,contract,timeframe,chartTime):
-    # we are sending buy sl order
+    # we are sending buy sl order (for SELL entry)
+    # Note: filled_price parameter is actually the entry stop order price (stop entry price/trigger price), not the actual fill price
+    # For SELL: Stop Loss = stop entry price + stop size
     if stoploss_type in Config.atrStopLossMap:
         atr_offset = _get_atr_stop_offset(connection, contract, stoploss_type)
         if atr_offset is not None:
+            # Stop Loss = stop entry price + stop size (for SELL, SL is above entry)
+            # stop entry price = entry stop order trigger price (auxPrice), not the actual fill price
             stpPrice = float(filled_price) + atr_offset
-            logging.info("ATR stop loss (short) %s offset %s filled_price %s stop %s",
+            logging.info("ATR stop loss (short) %s offset %s stop_entry_price %s stop %s (formula: stop_entry_price + stop_size)",
                          stoploss_type, atr_offset, filled_price, stpPrice)
             stpPrice = round(stpPrice, Config.roundVal)
             return stpPrice
@@ -6005,14 +6108,21 @@ def get_sl_for_buying(connection,stoploss_type,filled_price, histData,slValue ,c
     return stpPrice
 
 def TpSlForFB(connection,ibcontract,tradeType,quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk,tif,barType,userBuySell,userAtr,slValue=0,breakEven=False ,outsideRth=False):
+    # lastPrice is the entry stop order price (stop entry price/trigger price), used for TP/SL calculations
+    # For BUY: TP = stop_entry_price + multiplier * stop_size, SL = stop_entry_price - stop_size
+    # For SELL: TP = stop_entry_price - multiplier * stop_size, SL = stop_entry_price + stop_size
     try:
         tp,sl=0,0
         if tradeType == 'BUY':
-            tp = get_tp_for_selling(connection,timeFrame, ibcontract,profit,lastPrice, histData)
+            # Pass stopLoss to get_tp_for_selling so it can use ATR stop_size for ATR stop loss
+            # lastPrice is the stop entry price (entry stop order trigger price)
+            tp = get_tp_for_selling(connection,timeFrame, ibcontract,profit,lastPrice, histData, stopLoss)
             chartTime = datetime.datetime.strptime(str(datetime.datetime.now().date())+" "+Config.tradingTime,"%Y-%m-%d %H:%M:%S")
             sl = get_sl_for_selling(connection,stopLoss,lastPrice, histData,slValue ,ibcontract,timeFrame,chartTime)
         else:
-            tp = get_tp_for_buying(connection,timeFrame, ibcontract,profit,lastPrice, histData)
+            # Pass stopLoss to get_tp_for_buying so it can use ATR stop_size for ATR stop loss
+            # lastPrice is the stop entry price (entry stop order trigger price)
+            tp = get_tp_for_buying(connection,timeFrame, ibcontract,profit,lastPrice, histData, stopLoss)
             chartTime = datetime.datetime.strptime(str(datetime.datetime.now().date())+" "+Config.tradingTime,"%Y-%m-%d %H:%M:%S")
             sl = get_sl_for_buying(connection, stopLoss, lastPrice, histData, slValue, ibcontract, timeFrame,
                                     chartTime)
@@ -9867,11 +9977,29 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
                         timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                         breakEven, outsideRth, False, entry_points)
             
-            # Store stop_size for use in sendStopLoss (if needed for extended hours)
-            if int(entry_response.order.orderId) in Config.orderStatusData:
-                Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
-                Config.orderStatusData[int(entry_response.order.orderId)]['stopLossPrice'] = stop_loss_price
-                logging.info(f"Stored stop_size={stop_size}, stop_loss_price={stop_loss_price} in orderStatusData for Conditional Order {entry_response.order.orderId}")
+            # Store stop/TP details for use in retries (Error 103) and TP/SL management
+            entry_id_key = int(entry_response.order.orderId)
+            if entry_id_key in Config.orderStatusData:
+                order_state = Config.orderStatusData[entry_id_key]
+                order_state['stopSize'] = stop_size
+                # Legacy key (already used elsewhere)
+                order_state['stopLossPrice'] = stop_loss_price
+                # Standardized keys used by IBConnection.orderStatusEvent bracket regeneration
+                order_state['stop_loss_price'] = stop_loss_price
+                order_state['tp_price'] = tp_price
+                # For Conditional Order in RTH we always use a simple stop order for SL
+                order_state['stop_order_type'] = 'STP'
+                # No separate stop_limit_price needed for RTH Conditional Order
+                Config.orderStatusData[entry_id_key] = order_state
+                logging.info(
+                    "Stored Conditional Order TP/SL state in orderStatusData for %s: "
+                    "stop_size=%s, stop_loss_price=%s, tp_price=%s, stop_order_type=%s",
+                    entry_response.order.orderId,
+                    stop_size,
+                    stop_loss_price,
+                    tp_price,
+                    order_state['stop_order_type'],
+                )
             
             logging.info("Conditional Order entry task done %s", symbol)
             break
