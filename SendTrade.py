@@ -4081,22 +4081,23 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
             # Entry order is still active - proceed with entry order updates
             if (old_order['status'] != 'Filled' and old_order['status'] != 'Cancelled' and old_order['status'] != 'Inactive'):
                 logging.info("pbe2 stp updation start  %s %s", order.orderId , old_order['status'].upper()  )
-                chartTime = await get_first_chart_time(old_order['timeFrame'], old_order['outsideRth'])
-                recentBarData = connection.getHistoricalChartDataForEntry(old_order['contract'], old_order['timeFrame'], chartTime)
-                if (len(recentBarData) == 0):
-                    logging.info("last 3 record not found we will try after 2 sec.")
+                # Get current bar data - use rbb_entry_historical_data (same as RBB) for entry order update on new bar
+                # PBe logic = RBB+LOD/HOD: when new bar created and entry unfilled, update entry as RBB
+                newChartTime = getRecentChartTime(old_order['timeFrame'])
+                histData = connection.rbb_entry_historical_data(old_order['contract'], old_order['timeFrame'], newChartTime)
+                if (histData is None or len(histData) == 0):
+                    logging.info("PBe2 loop: Chart Data is Not Coming for %s contract and for %s time (using rbb_entry_historical_data)", old_order['contract'], newChartTime)
                     await  asyncio.sleep(1)
                     continue
                 
-                # Get current bar (last bar)
-                current_bar = recentBarData[len(recentBarData) - 1]
-                current_bar_high = float(current_bar.get('high', 0))
-                current_bar_low = float(current_bar.get('low', 0))
-                current_bar_datetime = current_bar.get('dateTime')
+                # rbb_entry_historical_data returns single dict: {high, low, dateTime, ...}
+                current_bar_high = float(histData.get('high', 0))
+                current_bar_low = float(histData.get('low', 0))
+                current_bar_datetime = histData.get('dateTime') or histData.get('date')
                 
                 # Get original bar's datetime to check if new bar closed
                 original_histData = old_order.get('histData', {})
-                original_bar_datetime = original_histData.get('dateTime') if original_histData else None
+                original_bar_datetime = original_histData.get('dateTime') or original_histData.get('date') if original_histData else None
                 
                 # Check if a new bar has closed (different datetime) - similar to RBB
                 should_update_entry = False
@@ -4111,12 +4112,13 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                 
                 # Update entry stop price if new bar closed (like RBB)
                 if should_update_entry:
-                    # Calculate new entry stop price: bar_high + 0.01 (BUY) or bar_low - 0.01 (SELL)
+                    # Calculate new entry stop price - same as RBB: bar_high/low ± entry_points ± 0.01
+                    entry_points = float(old_order.get('entry_points', '0'))
                     new_aux_price = 0
                     if old_order['userBuySell'] == 'BUY':
-                        new_aux_price = round(current_bar_high + 0.01, Config.roundVal)
+                        new_aux_price = round(current_bar_high - entry_points + 0.01, Config.roundVal)
                     else:  # SELL
-                        new_aux_price = round(current_bar_low - 0.01, Config.roundVal)
+                        new_aux_price = round(current_bar_low + entry_points - 0.01, Config.roundVal)
                     
                     # Get current entry stop price
                     current_entry_stop = round(float(order.auxPrice), Config.roundVal)
@@ -4167,7 +4169,7 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                         # Update orderStatusData
                         if Config.orderStatusData.get(old_orderId) is not None:
                             d = Config.orderStatusData.get(old_orderId)
-                            d['histData'] = current_bar
+                            d['histData'] = histData
                             d['orderId'] = int(response.order.orderId)
                             d['status'] = response.orderStatus.status
                             d['lastPrice'] = round(new_aux_price, Config.roundVal)
@@ -4451,70 +4453,19 @@ async def pbe1_loop_run(connection, key, entry_order):
             if (old_order['status'] != 'Filled' and old_order['status'] != 'Cancelled' and old_order['status'] != 'Inactive'):
                 logging.info(f"PBe1 loop: Monitoring order {order.orderId}, status={old_order['status']}")
                 
-                # Get current bar data - use getHistoricalChartDataForEntry to get the most recent bar (like PBe2)
-                # This ensures we get the latest bar, not a bar at a specific time
-                chartTime = getRecentChartTime(old_order['timeFrame'])
-                recentBarData = connection.getHistoricalChartDataForEntry(old_order['contract'], old_order['timeFrame'], chartTime)
-                if (len(recentBarData) == 0):
-                    logging.info("PBe1 loop: Chart Data is Not Coming for %s contract  and for %s time", old_order['contract'], chartTime)
+                # Get current bar data - use rbb_entry_historical_data (same as RBB) for entry order update on new bar
+                # PBe logic = RBB+LOD/HOD: when new bar created and entry unfilled, update entry as RBB
+                newChartTime = getRecentChartTime(old_order['timeFrame'])
+                histData = connection.rbb_entry_historical_data(old_order['contract'], old_order['timeFrame'], newChartTime)
+                if (histData is None or len(histData) == 0):
+                    logging.info("PBe1 loop: Chart Data is Not Coming for %s contract and for %s time (using rbb_entry_historical_data)", old_order['contract'], newChartTime)
                     await asyncio.sleep(1)
                     continue
-                
-                # Get the most recent CLOSED bar (previous bar, not the current forming bar)
-                # Use the second-to-last bar to ensure it's definitely closed
-                # Only update when a new bar closes (when the most recent closed bar changes)
-                if isinstance(recentBarData, dict) and len(recentBarData) > 0:
-                    sorted_keys = sorted(recentBarData.keys())
-                    if len(sorted_keys) >= 2:
-                        # Get the second-to-last bar (most recent closed bar)
-                        prev_key = sorted_keys[-2]
-                        current_bar = recentBarData.get(prev_key)
-                        logging.info("PBe1: Using second-to-last bar (key=%s) as most recent closed bar", prev_key)
-                    elif len(sorted_keys) == 1:
-                        # Only one bar available, use it (might be the initial bar)
-                        current_bar = recentBarData.get(sorted_keys[0])
-                        logging.info("PBe1: Only one bar available, using it (key=%s)", sorted_keys[0])
-                    else:
-                        logging.warning("PBe1 loop: Not enough bars in recentBarData (need at least 1)")
-                        await asyncio.sleep(1)
-                        continue
-                elif isinstance(recentBarData, list) and len(recentBarData) > 0:
-                    if len(recentBarData) >= 2:
-                        # Get the second-to-last bar (most recent closed bar)
-                        current_bar = recentBarData[-2]
-                        logging.info("PBe1: Using second-to-last bar (index=%s) as most recent closed bar", len(recentBarData) - 2)
-                    else:
-                        # Only one bar available, use it
-                        current_bar = recentBarData[-1]
-                        logging.info("PBe1: Only one bar available, using it (index=0)")
-                else:
-                    logging.warning("PBe1 loop: Could not extract current bar from recentBarData (type=%s, len=%s)", type(recentBarData), len(recentBarData) if recentBarData else 0)
-                    await asyncio.sleep(1)
-                    continue
-                
-                if not current_bar:
-                    logging.warning("PBe1 loop: Current bar is None or empty")
-                    await asyncio.sleep(1)
-                    continue
-                
-                # Convert to the format expected by the rest of the code
-                # getHistoricalChartDataForEntry returns 'date', not 'dateTime'
-                histData = {
-                    'close': current_bar.get('close', 0),
-                    'open': current_bar.get('open', 0),
-                    'high': current_bar.get('high', 0),
-                    'low': current_bar.get('low', 0),
-                    'dateTime': current_bar.get('dateTime') or current_bar.get('date')  # Handle both field names
-                }
                 
                 # Get the last processed bar's datetime from orderStatusData (updated after each bar)
-                # Note: pbe1_entry_historical_data returns 'date', rbb_entry_historical_data returns 'dateTime'
+                # rbb_entry_historical_data returns 'dateTime' - same as RBB
                 last_processed_histData = old_order.get('histData', {})
-                # Handle both 'date' (from pbe1) and 'dateTime' (from rbb) field names
-                last_processed_datetime = None
-                if last_processed_histData:
-                    last_processed_datetime = last_processed_histData.get('dateTime') or last_processed_histData.get('date')
-                # rbb_entry_historical_data returns 'dateTime', but we need to handle 'date' too
+                last_processed_datetime = last_processed_histData.get('dateTime') or last_processed_histData.get('date') if last_processed_histData else None
                 current_bar_datetime = histData.get('dateTime') or histData.get('date')
                 
                 # Check if a new bar has closed (different datetime)
@@ -4543,10 +4494,6 @@ async def pbe1_loop_run(connection, key, entry_order):
                             await asyncio.sleep(1)
                             continue
                         else:
-                        # Same bar, no update needed
-                            logging.info("PBe1: Same bar (datetime=%s), skipping update", current_bar_datetime)
-                            await asyncio.sleep(1)
-                            continue
                             # Same bar, no update needed
                             logging.info("PBe1: Same bar (datetime=%s), skipping update", current_bar_datetime)
                             await asyncio.sleep(1)
@@ -4613,15 +4560,16 @@ async def pbe1_loop_run(connection, key, entry_order):
                     await asyncio.sleep(1)
                     continue
                 
-                # Calculate new stop price based on new bar's high/low - same as regular RBB
-                # Entry stop price = bar_high + 0.01 (BUY) or bar_low - 0.01 (SELL)
+                # Calculate new stop price based on new bar's high/low - same as RBB (entry_points=0)
+                # Entry stop price = bar_high + 0.01 (BUY) or bar_low - 0.01 (SELL) - like RBB
+                entry_points = float(old_order.get('entry_points', '0'))
                 aux_price = 0
                 if old_order['userBuySell'] == 'BUY':
-                    aux_price = round(float(histData['high']) + 0.01, Config.roundVal)
-                    logging.info("PBe1 auxprice high for %s (new bar high=%s) - like RBB", aux_price, histData['high'])
+                    aux_price = round(float(histData['high']) - entry_points + 0.01, Config.roundVal)
+                    logging.info("PBe1 auxprice BUY (new bar): high=%s, entry_points=%s, aux_price=%s - like RBB", histData['high'], entry_points, aux_price)
                 else:  # SELL
-                    aux_price = round(float(histData['low']), Config.roundVal)
-                    logging.info("PBe1 auxprice low for %s (new bar low=%s) - prior bar low", aux_price, histData['low'])
+                    aux_price = round(float(histData['low']) + entry_points - 0.01, Config.roundVal)
+                    logging.info("PBe1 auxprice SELL (new bar): low=%s, entry_points=%s, aux_price=%s - like RBB", histData['low'], entry_points, aux_price)
                 
                 # Get stored LOD/HOD for stop_size calculation
                 stored_lod = old_order.get('pbe1_lod', 0)
