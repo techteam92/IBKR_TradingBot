@@ -24,6 +24,8 @@ class connection:
         if Config.orderStatusData.get(trade.order.orderId) != None:
             data = Config.orderStatusData.get(trade.order.orderId)
             data.update({'status': trade.orderStatus.status})
+            if hasattr(trade.orderStatus, 'whyHeld') and trade.orderStatus.whyHeld:
+                data.update({'whyHeld': trade.orderStatus.whyHeld})
             Config.orderStatusData.update({trade.order.orderId: data})
             # Exclude manual orders (Stop Order, Limit Order) and RBB from sendTpAndSl during regular hours
             # because they already send bracket orders. Extended hours manual orders and RBB need sendTpAndSl.
@@ -94,6 +96,214 @@ class connection:
                         should_send_tp_sl, 
                         data['barType'] != Config.entryTradeType[3],
                         not (is_manual_order and not is_extended_hours))
+
+            # ------------------------------------------------------------------
+            # Immediate recovery for manual Custom brackets on Duplicate order id
+            # ------------------------------------------------------------------
+            #
+            # If a manual Custom bracket entry is cancelled with IB Error 103
+            # ("Duplicate order id"), we do NOT want to leave the user with no
+            # active orders. Instead, we:
+            #
+            # - Detect the duplicate-id cancellation from the trade.log.
+            # - Generate a brand-new bracket (entry, TP, SL) with fresh IDs.
+            # - Place the new bracket immediately, without any artificial delay.
+            #
+            # This is similar in spirit to the Conditional Order fix, but scoped
+            # only to manual Custom (barType='Custom', is_manual_order=True).
+            duplicate_id_cancel = False
+            try:
+                if trade.orderStatus.status == 'Cancelled' and bar_type == 'Custom' and ord_type == 'Entry':
+                    # Inspect latest TradeLogEntry to see if this was Error 103
+                    last_log = trade.log[-1] if hasattr(trade, "log") and trade.log else None
+                    if last_log is not None and getattr(last_log, "errorCode", None) == 103:
+                        duplicate_id_cancel = True
+            except Exception as log_err:
+                logging.debug("orderStatusEvent: Unable to inspect trade.log for duplicate-id detection: %s", log_err)
+
+            if duplicate_id_cancel and is_manual_order:
+                # Avoid infinite regeneration loops: only retry once per entry.
+                already_retried = data.get('duplicateIdRetryDone', False)
+                if already_retried:
+                    logging.warning(
+                        "orderStatusEvent: Duplicate-id cancellation for manual Custom entry %s "
+                        "but duplicateIdRetryDone is already True. Skipping regeneration to avoid loop.",
+                        trade.order.orderId,
+                    )
+                else:
+                    # Mark as retried for this original entry id; new entry will
+                    # also carry duplicateIdRetryDone=True in its copied state.
+                    data['duplicateIdRetryDone'] = True
+                    Config.orderStatusData[trade.order.orderId] = data
+                    try:
+                        # Extract common state
+                        contract = data.get('contract')
+                        tif = data.get('tif', 'DAY')
+                        buy_sell_type = data.get('tradeType') or data.get('action') or trade.order.action
+                        outside_rth_flag = data.get('outsideRth', False)
+                        entry_price = data.get('lastPrice', trade.order.auxPrice)
+                        qty = data.get('quantity', trade.order.totalQuantity)
+
+                        if not contract:
+                            logging.error(
+                                "orderStatusEvent: Cannot regenerate manual Custom entry for %s - contract missing in orderStatusData",
+                                trade.order.orderId,
+                            )
+                        elif is_extended_hours:
+                            # ------------------------------------------------------------------
+                            # Extended hours (PREMARKET/AFTERHOURS/OVERNIGHT) manual Custom
+                            # ------------------------------------------------------------------
+                            # Only the entry STP LMT exists; TP/SL are sent after fill via
+                            # sendTpAndSl. Here we regenerate just the entry STP LMT with a
+                            # fresh orderId and identical pricing.
+                            entry_limit_price = data.get('entryLimitPrice')
+                            if entry_limit_price is None:
+                                logging.error(
+                                    "orderStatusEvent: Cannot regenerate extended-hours manual Custom entry for %s - "
+                                    "entryLimitPrice missing in orderStatusData",
+                                    trade.order.orderId,
+                                )
+                            else:
+                                new_entry_id = self.get_next_order_id()
+                                logging.info(
+                                    "orderStatusEvent: Regenerating extended-hours manual Custom entry with new ID %s "
+                                    "(old entry=%s, stop=%s, limit=%s, qty=%s)",
+                                    new_entry_id,
+                                    trade.order.orderId,
+                                    entry_price,
+                                    entry_limit_price,
+                                    qty,
+                                )
+                                entry_order = Order(
+                                    orderId=new_entry_id,
+                                    orderType="STP LMT",
+                                    action=buy_sell_type,
+                                    totalQuantity=qty,
+                                    auxPrice=entry_price,
+                                    lmtPrice=entry_limit_price,
+                                    tif=tif,
+                                )
+                                entry_resp = self.placeTrade(contract=contract, order=entry_order, outsideRth=outside_rth_flag)
+                                logging.info(
+                                    "orderStatusEvent: Regenerated extended-hours manual Custom entry placed - newOrderId=%s, status=%s",
+                                    entry_resp.order.orderId,
+                                    entry_resp.orderStatus.status,
+                                )
+                                # Copy state to new entry id
+                                new_state = dict(data)
+                                new_state['orderId'] = new_entry_id
+                                new_state['duplicateIdRetryDone'] = True
+                                Config.orderStatusData[new_entry_id] = new_state
+                        else:
+                            # ------------------------------------------------------------------
+                            # Regular-hours manual Custom: full bracket regeneration
+                            # ------------------------------------------------------------------
+                            logging.warning(
+                                "orderStatusEvent: Detected Duplicate order id (103) for manual Custom entry %s. "
+                                "Regenerating full bracket with new order IDs.",
+                                trade.order.orderId,
+                            )
+
+                            # Additional state needed for bracket
+                            tp_price = data.get('tp_price')
+                            stop_loss_price = data.get('stop_loss_price') or data.get('stopLossPrice')
+                            stop_size = data.get('stopSize')
+
+                            if tp_price is None or stop_loss_price is None or stop_size is None:
+                                logging.error(
+                                    "orderStatusEvent: Cannot regenerate manual Custom bracket for %s - "
+                                    "tp_price/stop_loss_price/stopSize missing (tp=%s, sl=%s, stopSize=%s)",
+                                    trade.order.orderId,
+                                    tp_price,
+                                    stop_loss_price,
+                                    stop_size,
+                                )
+                            else:
+                                # Generate fresh IDs for the new bracket
+                                new_parent_id = self.get_next_order_id()
+                                new_tp_id = self.get_next_order_id()
+                                new_sl_id = self.get_next_order_id()
+
+                                logging.info(
+                                    "orderStatusEvent: Regenerating manual Custom bracket with new IDs: "
+                                    "entry=%s, tp=%s, sl=%s (old entry=%s)",
+                                    new_parent_id,
+                                    new_tp_id,
+                                    new_sl_id,
+                                    trade.order.orderId,
+                                )
+
+                                # Rebuild entry STP order
+                                entry_order = Order(
+                                    orderId=new_parent_id,
+                                    orderType="STP",
+                                    action=buy_sell_type,
+                                    totalQuantity=qty,
+                                    auxPrice=entry_price,
+                                    tif=tif,
+                                    transmit=False,
+                                )
+
+                                # Rebuild TP LMT order
+                                tp_order = Order(
+                                    orderId=new_tp_id,
+                                    orderType="LMT",
+                                    action="SELL" if buy_sell_type.upper() == "BUY" else "BUY",
+                                    totalQuantity=qty,
+                                    lmtPrice=tp_price,
+                                    parentId=new_parent_id,
+                                    transmit=False,
+                                )
+
+                                # Rebuild SL STP order
+                                sl_order = Order(
+                                    orderId=new_sl_id,
+                                    orderType="STP",
+                                    action="SELL" if buy_sell_type.upper() == "BUY" else "BUY",
+                                    totalQuantity=qty,
+                                    auxPrice=round(stop_loss_price, Config.roundVal),
+                                    parentId=new_parent_id,
+                                    transmit=True,  # last leg transmits entire bracket
+                                )
+
+                                # Place the new bracket immediately (no artificial delay)
+                                entry_resp = self.placeTrade(contract=contract, order=entry_order, outsideRth=outside_rth_flag)
+                                logging.info(
+                                    "orderStatusEvent: Regenerated manual Custom entry placed - newOrderId=%s, status=%s",
+                                    entry_resp.order.orderId,
+                                    entry_resp.orderStatus.status,
+                                )
+
+                                tp_resp = self.placeTrade(contract=contract, order=tp_order, outsideRth=outside_rth_flag)
+                                logging.info(
+                                    "orderStatusEvent: Regenerated manual Custom TP placed - newOrderId=%s, status=%s, parentId=%s",
+                                    tp_resp.order.orderId,
+                                    tp_resp.orderStatus.status,
+                                    tp_resp.order.parentId,
+                                )
+
+                                sl_resp = self.placeTrade(contract=contract, order=sl_order, outsideRth=outside_rth_flag)
+                                logging.info(
+                                    "orderStatusEvent: Regenerated manual Custom SL placed - newOrderId=%s, status=%s, parentId=%s, transmit=%s",
+                                    sl_resp.order.orderId,
+                                    sl_resp.orderStatus.status,
+                                    sl_resp.order.parentId,
+                                    sl_resp.order.transmit,
+                                )
+
+                                # Update orderStatusData to reference the new entry ID
+                                new_state = dict(data)
+                                new_state['orderId'] = new_parent_id
+                                new_state['duplicateIdRetryDone'] = True
+                                Config.orderStatusData[new_parent_id] = new_state
+
+                    except Exception as regen_err:
+                        logging.error(
+                            "orderStatusEvent: Error while regenerating manual Custom order after Duplicate order id "
+                            "for %s: %s",
+                            trade.order.orderId,
+                            regen_err,
+                        )
             
             # Only call sendTpAndSl when entry order is Filled (not for PendingCancel, Submitted, etc.)
             # This prevents duplicate TP/SL orders when entry order is being updated (cancelled/replaced)
@@ -123,49 +333,140 @@ class connection:
             return False
 
     def _initialize_order_ids(self):
-        """Fetch the next valid order id from IB."""
+        """
+        Ensure the IB client is fully ready so that we can use
+        ``self.ib.client.getReqId()`` as the **only** source of new
+        order IDs.
+
+        ib_insync already syncs its internal request-ID sequence with
+        TWS's ``nextValidId`` during the connection handshake (see
+        Client._onSocketHasData: msgId == 9). By using
+        ``client.getReqId()`` for every new order we automatically
+        stay above any ID IB has ever seen for this client session.
+
+        IMPORTANT:
+        - We no longer seed our own counter from ``time.time()``.
+        - We no longer guess at an ``orderIdSeq`` attribute (it does
+          not exist on ib_insync's Client).
+
+        This removes the root cause of Error 103 ("Duplicate order id")
+        that came from using time-based seeds like 1769681xxx.
+        """
         try:
-            # In ib_insync, reqIds is on the client object, not the IB object
-            if hasattr(self.ib.client, 'reqIds'):
-                self.ib.client.reqIds(1)
-            else:
-                # Alternative: wait for nextValidId to be set automatically
-                logging.info("reqIds not available, waiting for nextValidId from connection")
-            
             start = time.time()
-            # Wait for orderIdSeq to be populated (this is set when nextValidId is received)
-            while getattr(self.ib.client, "orderIdSeq", None) is None:
-                if time.time() - start > 5:
+            # Wait until the client reports that the API is ready.
+            while not self.ib.client.isReady():
+                if time.time() - start > 10:
+                    logging.warning(
+                        "IB client not fully ready for order IDs after 10s; "
+                        "will still rely on client.getReqId() when available."
+                    )
                     break
                 self.ib.waitOnUpdate(timeout=1)
-            
-            next_id = getattr(self.ib.client, "orderIdSeq", None)
-            if next_id is None:
-                # Fallback: try to get nextValidId directly if available
-                if hasattr(self.ib, 'nextValidOrderId') and self.ib.nextValidOrderId:
-                    next_id = self.ib.nextValidOrderId
-                else:
-                    next_id = int(time.time())
-                    logging.warning("nextValidId not received, defaulting order id seed to %s", next_id)
+
+            if self.ib.client.isReady():
+                logging.info(
+                    "Order ID initialization: IB client is ready; "
+                    "get_next_order_id() will use ib.client.getReqId() "
+                    "for all new order IDs."
+                )
             else:
-                logging.info("Order ID initialized from orderIdSeq: %s", next_id)
-            
-            with self._order_id_lock:
-                self._order_id_counter = int(next_id)
+                logging.warning(
+                    "Order ID initialization: IB client not ready yet; "
+                    "get_next_order_id() will fall back to a local counter "
+                    "until the client becomes ready."
+                )
         except Exception as err:
-            logging.error("Unable to initialize order ids: %s", err)
-            # Fallback to time-based ID
-            with self._order_id_lock:
-                self._order_id_counter = int(time.time())
-                logging.warning("Using time-based order ID seed: %s", self._order_id_counter)
+            logging.error("Unable to run order ID initialization: %s", err)
+
+    def _sync_order_id_with_existing_trades(self):
+        """
+        Ensure _order_id_counter is strictly greater than any orderId that
+        already exists for this client in the current IB session.
+
+        This is a defensive guard against "Duplicate order id" (Error 103)
+        that can happen if:
+        - The app was restarted and used a time-based seed that overlaps with
+          previously used IDs in the same TWS session, or
+        - nextValidId / orderIdSeq was not yet available and we seeded too low.
+        """
+        try:
+            existing_trades = self.ib.trades()
+
+            # ib.trades() can be a list or a dict-like; handle both safely.
+            if isinstance(existing_trades, dict):
+                trade_iter = existing_trades.values()
+            else:
+                trade_iter = existing_trades
+
+            max_used_id = None
+            for trade in trade_iter:
+                try:
+                    oid = getattr(trade.order, "orderId", None)
+                    if oid is None:
+                        continue
+                    if max_used_id is None or oid > max_used_id:
+                        max_used_id = oid
+                except Exception:
+                    # Be defensive; a single bad Trade object should not break syncing
+                    continue
+
+            if max_used_id is not None:
+                with self._order_id_lock:
+                    if self._order_id_counter is None or self._order_id_counter <= max_used_id:
+                        new_counter = int(max_used_id) + 1
+                        logging.info(
+                            "Syncing order ID counter to %s based on existing trades (max_used_id=%s)",
+                            new_counter,
+                            max_used_id,
+                        )
+                        self._order_id_counter = new_counter
+        except Exception as e:
+            # This is a best-effort safeguard; log and continue if it fails.
+            logging.warning("Failed to sync order ID counter with existing trades: %s", e)
 
     def get_next_order_id(self):
+        """
+        Get a new unique order ID.
+
+        Primary path:
+        - Use ``self.ib.client.getReqId()``, which ib_insync seeds from
+          IB's ``nextValidId``. This guarantees we always move forward
+          and never reuse an ID from the current TWS/Gateway session.
+
+        Fallback:
+        - If the client is not ready yet (very early startup) or if
+          something goes wrong, we fall back to an internal counter.
+          That counter is only a last resort; under normal operation
+          all live trades will use the ib_insync-generated IDs.
+        """
         with self._order_id_lock:
+            try:
+                if self.ib.client.isReady():
+                    oid = self.ib.client.getReqId()
+                    logging.debug("get_next_order_id: using ib.client.getReqId() -> %s", oid)
+                    return oid
+            except Exception as e:
+                logging.warning("get_next_order_id: ib.client.getReqId() failed, falling back to local counter: %s", e)
+
+            # Fallback local counter (should rarely be used)
             if self._order_id_counter is None:
-                self._order_id_counter = int(time.time())
-            next_id = self._order_id_counter
+                # Start from a high range to reduce the chance of clashing
+                # with any historical IDs in this TWS session.
+                base = int(time.time())
+                if base < 2_000_000_000:
+                    base = 2_000_000_000
+                self._order_id_counter = base
+                logging.warning(
+                    "get_next_order_id: initializing local fallback counter to %s "
+                    "(ib.client not ready)",
+                    self._order_id_counter,
+                )
+
+            oid = self._order_id_counter
             self._order_id_counter += 1
-            return next_id
+            logging.debug("get_next_order_id: using local fallback counter -> %s", oid)
+            return oid
     def reqPnl(self, retry_count=0, max_retries=10):
         """
         Request PnL tracking. Will retry if connection/account not ready yet.
@@ -647,32 +948,13 @@ class connection:
             logging.error('getHistoricalData ' + str(e))
             return {}
 
-    def fb_entry_historical_data(self,ibcontract,timeFrame,configTime):
-        try:
-            nest_asyncio.apply()
-            logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ",configTime,timeFrame,ibcontract)
-            histData = self.getChartData(ibcontract,timeFrame,configTime)
-            if(len(histData) == 0):
-                logging.info("historical data not found for %s contract , time frame %s, time %s",ibcontract,timeFrame,configTime)
-                return {}
-
-            oldRow=None
-            historical ={}
-            configTime = configTime.time().replace(microsecond=0)
-            for data in histData:
-                chart_date = data.date.date()
-                if (datetime.datetime.now().date() == chart_date) and (data.date.time() >= configTime):
-                    # here we are checking if time 9:31 thenwe will get 9:30 data...
-                    if(oldRow != None and (oldRow.date.time() == configTime)):
-                        logging.info("we are adding this row in historical %s   {For %s contract }",oldRow,ibcontract)
-                        if (data.date.date() == datetime.datetime.now().date()) and (data.date.time() >= datetime.datetime.strptime( str(datetime.datetime.now().date()) + " " + Config.tradingTime,  "%Y-%m-%d %H:%M:%S").time()):
-                            historical = {"close": oldRow.close, "open": oldRow.open, "high": oldRow.high, "low": oldRow.low,"dateTime":oldRow.date}
-                            break
-                oldRow = data
-            logging.info("historical data found %s ",historical)
-            return historical
-        except Exception as e:
-            logging.error('getHistoricalData ' + str(e))
+    def fb_entry_historical_data(self, ibcontract, timeFrame, configTime):
+        """
+        FB: Same logic as lb1_entry_historical_data - just different configTime.
+        LB: configTime=09:29 -> index 0 = LAST BAR of pre-market.
+        FB: configTime=09:30 -> index 0 = FIRST BAR of regular hours.
+        """
+        return self.lb1_entry_historical_data(ibcontract, timeFrame, configTime)
 
     def rbb_entry_historical_data(self,ibcontract,timeFrame,configTime):
         try:
@@ -685,22 +967,22 @@ class connection:
 
             oldRow=None
             historical ={}
-            # prev_time = configTime - datetime.timedelta(minutes=1)
-            # prev_time = prev_time.time().replace(microsecond=0)
-            # prev_time = prev_time.replace(second=0)
-            configTime = configTime.time().replace(microsecond=0)
-            configTime = configTime.replace(second=0)
+            configTimeAsTime = configTime.time().replace(microsecond=0).replace(second=0)
+            today = datetime.datetime.now().date()
+            lastBarFromToday = None  # fallback: most recent completed bar from today
             for data in histData:
                 chart_date = data.date.date()
-                #   todo  need to remove
-                # chart_date =datetime.datetime.now().date()
-                # configTime = datetime.datetime.strptime("2023-04-01 17:15:00","%Y-%m-%d %H:%M:%S").time()
-                if (datetime.datetime.now().date() == chart_date) and (data.date.time() == configTime):
+                if chart_date == today:
+                    lastBarFromToday = data
+                if (today == chart_date) and (data.date.time().replace(microsecond=0).replace(second=0) == configTimeAsTime):
                     logging.info("we are adding this row in historical %s   {For %s contract }",data,ibcontract)
-                    # if (data.date.time() == prev_time) and (data.date.time() >= datetime.datetime.strptime( str(datetime.datetime.now().date()) + " " + Config.tradingTime,  "%Y-%m-%d %H:%M:%S").time()):
                     historical = {"close": data.close, "open": data.open, "high": data.high, "low": data.low,"dateTime":data.date}
                     break
                 oldRow = data
+            # When no bar exactly matches configTime (e.g. current bar not yet complete), use most recent completed bar from today
+            if not historical and lastBarFromToday is not None:
+                historical = {"close": lastBarFromToday.close, "open": lastBarFromToday.open, "high": lastBarFromToday.high, "low": lastBarFromToday.low,"dateTime":lastBarFromToday.date}
+                logging.info("RBB: no exact bar for %s; using last completed bar from today %s for %s", configTimeAsTime, lastBarFromToday.date, ibcontract)
             logging.info("historical data found %s ",historical)
             return historical
         except Exception as e:
