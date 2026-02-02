@@ -15,6 +15,7 @@ class connection:
         self.ib = IB()
         self._order_id_lock = threading.Lock()
         self._order_id_counter = None
+        self._has_connected = False  # Track if we've ever connected (for proper reconnect)
 
     # it will set trade order status value in global variable.
     def orderStatusEvent(self,trade: Trade):
@@ -318,19 +319,45 @@ class connection:
                 logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
                             trade.order.orderId, bar_type, ord_type)
 
-    # tws connection stablish
+    # tws connection establish
     def connect(self):
+        """
+        Connect to TWS. For reconnection after a dropped connection, creates a fresh
+        IB instance because ib_insync does not reliably support reconnect on the same
+        object (can cause clientId conflicts or frozen state).
+        """
         try:
-            self.ib.connect(host=Config.host, port=Config.port, clientId=Config.clientId)
-            # self.ib.waitOnUpdate()
-            self.ib.orderStatusEvent += self.orderStatusEvent
-            self.pnlEvent = self.pnlData
-            # self.ib.pendingTickersEvent += self.onPendingTickers
-            # self.reqPnl()
-            self._initialize_order_ids()
+            if self._has_connected and not self.ib.isConnected():
+                self._reconnect_with_fresh_instance()
+            else:
+                self._do_connect()
+            self._has_connected = True
         except Exception as e:
             logging.error("Error in ib connection " + str(e))
             return False
+
+    def _reconnect_with_fresh_instance(self):
+        """
+        Reconnect by creating a fresh IB instance. Required because ib_insync's
+        disconnect() doesn't close the socket synchronously, and reconnecting on
+        the same object can cause clientId conflicts with TWS/Gateway.
+        """
+        logging.info("Reconnecting: creating fresh IB instance and waiting for clientId release...")
+        time.sleep(3)  # Allow TWS to release the previous clientId
+        try:
+            if self.ib is not None:
+                self.ib.orderStatusEvent -= self.orderStatusEvent
+        except Exception:
+            pass
+        self.ib = IB()
+        self._do_connect()
+
+    def _do_connect(self):
+        """Perform the actual connection and event registration."""
+        self.ib.connect(host=Config.host, port=Config.port, clientId=Config.clientId)
+        self.ib.orderStatusEvent += self.orderStatusEvent
+        self.pnlEvent = self.pnlData
+        self._initialize_order_ids()
 
     def _initialize_order_ids(self):
         """

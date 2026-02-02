@@ -537,6 +537,19 @@ async def first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,bar
             else:
                 Config.historicalData.update({key: histData})
         histData = Config.historicalData.get(key)
+        # fb_entry_historical_data returns {0: {...}, 1: {...}} - extract first bar for single-bar format
+        if histData and isinstance(histData, dict) and 'high' not in histData:
+            first_bar_key = min((k for k in histData.keys() if isinstance(k, int)), default=None)
+            if first_bar_key is not None:
+                histData = histData[first_bar_key]
+            else:
+                logging.info("No bar data in histData for %s contract", ibContract)
+                await asyncio.sleep(1)
+                continue
+        if not histData or 'high' not in histData or 'low' not in histData:
+            logging.info("Chart Data missing high/low for %s contract", ibContract)
+            await asyncio.sleep(1)
+            continue
         lastPrice = connection.get_recent_close_price_data(ibContract, timeFrame, chartTime)
         if (lastPrice == None or len(lastPrice) == 0 ):
             logging.info("Last Price Not Found for %s contract for mkt order", ibContract)
@@ -841,26 +854,27 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         is_extended, session = _is_extended_outside_rth(outsideRth)
         
         if is_lod_hod and lod is not None and hod is not None and recent_bar_data and len(recent_bar_data) > 0:
-            # For HOD/LOD with RBB: Entry stop price uses EntryBar logic (bar_high/low ± entry_points ± 0.01)
+            # For HOD/LOD with RBB: Entry stop price uses EntryBar logic (previous bar high/low ± entry_points ± 0.01)
             # LOD/HOD is ONLY used for stop loss price, NOT for entry stop price
-            # For RBB+EntryBar: Entry stop price = bar_high - entry_points + 0.01 (BUY) or bar_low + entry_points - 0.01 (SELL)
+            # For RTH RBB: BUY = bar_high + entry_point + 0.01, SELL = bar_low - entry_point - 0.01 (previous bar)
             if buySellType == 'BUY':
-                aux_price = float(histData['high']) - float(entry_points) + 0.01
-                logging.info(f"RB HOD/LOD BUY: Setting entry stop price to bar_high - entry_points + 0.01 = {aux_price} (EntryBar logic, LOD={lod} is only for stop loss), entry_points={entry_points}")
+                aux_price = float(histData['high']) + float(entry_points) + 0.01
+                logging.info(f"RB HOD/LOD BUY: Setting entry stop price to bar_high + entry_points + 0.01 = {aux_price} (EntryBar logic, LOD={lod} is only for stop loss), entry_points={entry_points}")
             else:  # SELL
-                aux_price = float(histData['low']) + float(entry_points) - 0.01
-                logging.info(f"RB HOD/LOD SELL: Setting entry stop price to bar_low + entry_points - 0.01 = {aux_price} (EntryBar logic, HOD={hod} is only for stop loss), entry_points={entry_points}")
+                aux_price = float(histData['low']) - float(entry_points) - 0.01
+                logging.info(f"RB HOD/LOD SELL: Setting entry stop price to bar_low - entry_points - 0.01 = {aux_price} (EntryBar logic, HOD={hod} is only for stop loss), entry_points={entry_points}")
             
             aux_price = round(aux_price, Config.roundVal)
             logging.info(f"RB HOD/LOD entry stop price FINAL: buySellType={buySellType}, stopLoss={stopLoss}, LOD={lod}, HOD={hod}, aux_price={aux_price}, is_extended={is_extended}, entry_points={entry_points}")
         else:
-            # Regular stop loss or HOD/LOD data unavailable: use current bar's high/low
+            # Regular stop loss or HOD/LOD data unavailable: use previous bar's high/low
+            # For RTH RBB: BUY = bar_high + entry_point + 0.01, SELL = bar_low - entry_point - 0.01 (previous bar)
             if is_lod_hod:
                 logging.warning("RB LOD/HOD: No historical data, using current bar's high/low as fallback")
             if buySellType == 'BUY':
-                aux_price = histData['high'] - float(entry_points)
+                aux_price = histData['high'] + float(entry_points)
             else:
-                aux_price = histData['low'] + float(entry_points)
+                aux_price = histData['low'] - float(entry_points)
         
         if int(quantity) == 0:
             if is_lod_hod and lod is not None and hod is not None and recent_bar_data and len(recent_bar_data) > 0:
@@ -946,7 +960,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
         # For RTH: Use stop order (for both HOD/LOD and regular stop loss)
         if is_extended:
             # For Custom stop loss in extended hours: Calculate entry price from bar high/low
-            # Entry price: Low - 0.01 for long (BUY), High + 0.01 for short (SELL)
+            # RBB/RB entry stop: previous high + 0.01 (BUY breakout above) or previous low - 0.01 (SELL breakout below)
             # Entry limit price: entry_price ± 0.5 * stop_size
             if stopLoss == Config.stopLoss[1]:  # 'Custom'
                 custom_stop = _to_float(slValue, 0)
@@ -954,16 +968,16 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                     logging.error("Custom stop loss requires a valid value for %s in extended hours %s", stopLoss, symbol)
                     return
                 
-                # Calculate entry price from bar high/low
+                # Calculate entry price from bar high/low (breakout logic: high + 0.01 / low - 0.01)
                 bar_high = float(histData.get('high', 0))
                 bar_low = float(histData.get('low', 0))
                 
                 if tradeType == 'BUY':
-                    # For BUY (long): entry_price = bar_low - 0.01
-                    aux_price = round(bar_low - 0.01, Config.roundVal)
-                else:  # SELL
-                    # For SELL (short): entry_price = bar_high + 0.01
+                    # For BUY (long): entry_price = bar_high + 0.01 (breakout above previous high)
                     aux_price = round(bar_high + 0.01, Config.roundVal)
+                else:  # SELL
+                    # For SELL (short): entry_price = bar_low - 0.01 (breakout below previous low)
+                    aux_price = round(bar_low - 0.01, Config.roundVal)
                 
                 # Calculate stop_size: |entry_price - custom_stop| + 0.02
                 stop_size = abs(aux_price - custom_stop) + 0.02
@@ -1035,11 +1049,11 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                 if tradeType == 'BUY':
                     # For BUY: Limit = LOD + 0.5 × stop_size
                     limit_price = lod + entry_limit_offset
-                    logging.info(f"RB Extended hours HOD/LOD BUY: Stop={aux_price} (bar_high - entry_points + 0.01, EntryBar logic), Limit={limit_price} (LOD + 0.5×stop_size={entry_limit_offset}), LOD={lod}, stop_size={stop_size}")
+                    logging.info(f"RB Extended hours HOD/LOD BUY: Stop={aux_price} (bar_high + entry_points + 0.01, EntryBar logic), Limit={limit_price} (LOD + 0.5×stop_size={entry_limit_offset}), LOD={lod}, stop_size={stop_size}")
                 else:  # SELL
                     # For SELL: Limit = HOD - 0.5 × stop_size
                     limit_price = hod - entry_limit_offset
-                    logging.info(f"RB Extended hours HOD/LOD SELL: Stop={aux_price} (bar_low + entry_points - 0.01, EntryBar logic), Limit={limit_price} (HOD - 0.5×stop_size={entry_limit_offset}), HOD={hod}, stop_size={stop_size}")
+                    logging.info(f"RB Extended hours HOD/LOD SELL: Stop={aux_price} (bar_low - entry_points - 0.01, EntryBar logic), Limit={limit_price} (HOD - 0.5×stop_size={entry_limit_offset}), HOD={hod}, stop_size={stop_size}")
             else:
                 # Regular stop loss: Limit = Stop ± 0.5 × stop_size
                 if tradeType == 'BUY':
@@ -2566,11 +2580,11 @@ async def rbb_loop_run(connection,key,entry_order):
                     should_update = False
                     entry_points = float(old_order.get('entry_points', '0'))
                     
-                    # Calculate what the new entry price should be using EntryBar logic
+                    # Calculate what the new entry price should be using EntryBar logic (RTH: BUY = bar_high + entry_point + 0.01, SELL = bar_low - entry_point - 0.01)
                     if old_order['userBuySell'] == 'BUY':
-                        new_aux_price_calc = round(float(histData['high']) - entry_points + 0.01, Config.roundVal)
+                        new_aux_price_calc = round(float(histData['high']) + entry_points + 0.01, Config.roundVal)
                     else:  # SELL
-                        new_aux_price_calc = round(float(histData['low']) + entry_points - 0.01, Config.roundVal)
+                        new_aux_price_calc = round(float(histData['low']) - entry_points - 0.01, Config.roundVal)
                     
                     if last_processed_datetime and current_bar_datetime:
                         # Compare datetimes - convert to comparable format if needed
