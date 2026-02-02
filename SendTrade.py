@@ -1165,9 +1165,9 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                 logging.info(f"RB RTH Bracket: entry={aux_price}, stop_loss={stop_loss_price}, tp={tp_price}, stop_size={tp_stop_size}, multiplier={multiplier}")
                 
                 # Generate unique order IDs for bracket orders (using trade-type-specific ranges)
-                parent_order_id = connection.get_next_order_id(barType)
-                tp_order_id = connection.get_next_order_id('TakeProfit')
-                sl_order_id = connection.get_next_order_id('StopLoss')
+                parent_order_id = connection.get_next_order_id()
+                tp_order_id = connection.get_next_order_id()
+                sl_order_id = connection.get_next_order_id()
                 
                 logging.info("RB RTH: Generated unique order IDs for bracket: entry=%s, tp=%s, sl=%s (barType=%s)", 
                             parent_order_id, tp_order_id, sl_order_id, barType)
@@ -1234,7 +1234,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                         if "done state" in str(e) or "AssertionError" in str(e):
                             logging.warning("RB RTH: TP order ID %s in done state, generating new ID and retrying", tp_order_id)
                             # Generate new TP order ID and retry
-                            tp_order_id = connection.get_next_order_id('TakeProfit')
+                            tp_order_id = connection.get_next_order_id()
                             tp_order.orderId = tp_order_id
                             tp_response = connection.placeTrade(contract=ibContract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
                             logging.info("RB RTH: TP order placed with new ID: %s", tp_order_id)
@@ -1255,7 +1255,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                         if "done state" in str(e) or "AssertionError" in str(e):
                             logging.warning("RB RTH: SL order ID %s in done state, generating new ID and retrying", sl_order_id)
                             # Generate new SL order ID and retry
-                            sl_order_id = connection.get_next_order_id('StopLoss')
+                            sl_order_id = connection.get_next_order_id()
                             sl_order.orderId = sl_order_id
                             sl_response = connection.placeTrade(contract=ibContract, order=sl_order, outsideRth=outsideRth, trade_type='StopLoss')
                             logging.info("RB RTH: SL order placed with new ID: %s", sl_order_id)
@@ -1565,8 +1565,8 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
         else:
             # Regular market hours: Send bracket orders (Entry LMT, TP LMT, SL STP)
             # Generate separate unique order IDs for each order in the bracket
-            tp_order_id = connection.get_next_order_id('TakeProfit')
-            sl_order_id = connection.get_next_order_id('StopLoss')
+            tp_order_id = connection.get_next_order_id()
+            sl_order_id = connection.get_next_order_id()
             
             logging.info("Generated unique order IDs for bracket: entry=%s, tp=%s, sl=%s (barType=%s)", 
                         parent_order_id, tp_order_id, sl_order_id, barType)
@@ -2204,7 +2204,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                     elif entry_response and 'Duplicate order id' in str(entry_response.orderStatus):
                         # Duplicate order ID - get new ID and retry
                         logging.warning(f"Duplicate order ID {parent_order_id}, getting new ID and retrying...")
-                        parent_order_id = connection.get_next_order_id(barType)
+                        parent_order_id = connection.get_next_order_id()
                         entry_order.orderId = parent_order_id
                         retry_count += 1
                         await asyncio.sleep(0.1)  # Small delay before retry
@@ -2213,7 +2213,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 except Exception as e:
                     if 'Duplicate order id' in str(e) or '103' in str(e):
                         logging.warning(f"Duplicate order ID error: {e}, getting new ID and retrying...")
-                        parent_order_id = connection.get_next_order_id(barType)
+                        parent_order_id = connection.get_next_order_id()
                         entry_order.orderId = parent_order_id
                         retry_count += 1
                         await asyncio.sleep(0.1)  # Small delay before retry
@@ -2241,8 +2241,8 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
         else:
             # Regular market hours: Send bracket orders (Entry STP, TP LMT, SL STP)
             # Generate separate unique order IDs for each order in the bracket
-            tp_order_id = connection.get_next_order_id('TakeProfit')
-            sl_order_id = connection.get_next_order_id('StopLoss')
+            tp_order_id = connection.get_next_order_id()
+            sl_order_id = connection.get_next_order_id()
             
             logging.info("Generated unique order IDs for bracket: entry=%s, tp=%s, sl=%s (barType=%s)", 
                         parent_order_id, tp_order_id, sl_order_id, barType)
@@ -2402,6 +2402,10 @@ async def rbb_loop_run(connection,key,entry_order):
             if old_order['status'] == 'Filled' and old_order.get('outsideRth', False):
                 is_extended, session = _is_extended_outside_rth(old_order.get('outsideRth', False))
                 if is_extended:
+                    # Skip if sendTpAndSl/sendTpSlSell already placed TP/SL (prevents duplicate stop loss)
+                    if old_order.get('tp_sl_sent', False):
+                        logging.info("RBBB Entry filled in %s: tp_sl_sent=True, skipping protection order (TP/SL already placed by sendTpAndSl)", session)
+                        break
                     # Check if protection order already placed
                     if not old_order.get('protection_placed', False):
                         logging.info("RBBB Entry filled in %s, placing protection stop limit order", session)
@@ -3267,9 +3271,9 @@ async def lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
             logging.info(f"LB1 RTH Bracket: entry={aux_price}, stop_loss={stop_loss_price}, tp={tp_price}, stop_size={tp_stop_size}, multiplier={multiplier}")
             
             # Generate unique order IDs for bracket orders (using trade-type-specific ranges)
-            parent_order_id = connection.get_next_order_id(barType)
-            tp_order_id = connection.get_next_order_id('TakeProfit')
-            sl_order_id = connection.get_next_order_id('StopLoss')
+            parent_order_id = connection.get_next_order_id()
+            tp_order_id = connection.get_next_order_id()
+            sl_order_id = connection.get_next_order_id()
             
             logging.info("LB1 RTH: Generated unique order IDs for bracket: entry=%s, tp=%s, sl=%s (barType=%s)", 
                         parent_order_id, tp_order_id, sl_order_id)
@@ -3327,7 +3331,7 @@ async def lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
                     if "done state" in str(e) or "AssertionError" in str(e):
                         logging.warning("LB1 RTH: TP order ID %s in done state, generating new ID and retrying", tp_order_id)
                         # Generate new TP order ID and retry
-                        tp_order_id = connection.get_next_order_id('TakeProfit')
+                        tp_order_id = connection.get_next_order_id()
                         tp_order.orderId = tp_order_id
                         tp_response = connection.placeTrade(contract=ibContract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
                         logging.info("LB1 RTH: TP order placed with new ID: %s", tp_order_id)
@@ -3914,13 +3918,21 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                             
                             pbe1_stop_loss_price = round(pbe1_stop_loss_price, Config.roundVal)
                         
-                        # Get current price for stop loss check (use close price, not high/low)
+                        # Get current price for stop loss check (use bar LOW for BUY, HIGH for SELL - not close)
+                        # Close can miss stop-out: if price wicks to LOD/HOD and closes back, we'd never detect it
                         if current_price is None or (ticker is None):
                             latest_bar_data = connection.pbe1_entry_historical_data(ibContract, timeFrame, chartTime)
                             if latest_bar_data and len(latest_bar_data) > 0:
-                                current_price = float(latest_bar_data[-1].get('close', 0))
+                                latest_bar = latest_bar_data[-1]
+                                if pbe1_tradeType == 'BUY':
+                                    current_price = float(latest_bar.get('low', latest_bar.get('close', 0)))  # Use low - stop out if low <= LOD
+                                else:  # SELL
+                                    current_price = float(latest_bar.get('high', latest_bar.get('close', 0)))  # Use high - stop out if high >= HOD
                             else:
-                                current_price = float(last_candel.get('close', 0))
+                                if pbe1_tradeType == 'BUY':
+                                    current_price = float(last_candel.get('low', last_candel.get('close', 0)))
+                                else:
+                                    current_price = float(last_candel.get('high', last_candel.get('close', 0)))
                             current_price = round(current_price, Config.roundVal)
                         
                         if pbe1_tradeType == 'BUY':
@@ -7595,6 +7607,9 @@ def sendStopLoss(connection, entryData,price,action):
             if filled_price is None:
                 filled_price = entryData.get('lastPrice', adjusted_price)
             
+            # Initialize calculated_stop_size from entryData (set by sendTpSlSell/sendTpSlBuy) for RB/RBB/LB/LB2/LB3 block below
+            calculated_stop_size = entryData.get('calculated_stop_size')
+            
             # Check if stop loss type is ATR-based
             stop_loss_type = entryData.get('stopLoss')
             if stop_loss_type in Config.atrStopLossMap:
@@ -7602,6 +7617,7 @@ def sendStopLoss(connection, entryData,price,action):
                 atr_offset = _get_atr_stop_offset(connection, entryData['contract'], stop_loss_type)
                 if atr_offset is not None:
                     stop_size = atr_offset
+                    calculated_stop_size = atr_offset  # For RB/RBB/LB/LB2/LB3 block below
                     protection_offset = 2 * atr_offset  # 2x for stop price
                     limit_offset = 1 * atr_offset  # 1x for limit price
                     logging.info(f"Extended hours ATR stop-limit: action={action}, ATR stop_size={stop_size}, protection_offset={protection_offset}, limit_offset={limit_offset}")
@@ -8236,7 +8252,7 @@ def sendStopLoss(connection, entryData,price,action):
             logging.info(f"sendStopLoss: RTH - Using simple STP order (no limit price)")
 
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
-                                            order=Order(**order_kwargs), outsideRth=entryData['outsideRth'], trade_type='StopLoss' )
+                                            order=Order(**order_kwargs), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'StopLoss', entryData['contract'], order_type, action, entryData['totalQuantity'], entryData['histData'], adjusted_price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
 
         print(lmtResponse)
@@ -8261,7 +8277,7 @@ def sendTakeProfit(connection, entryData,price,action):
         
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
                                             order=Order(orderType="LMT", action=action,
-                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1)  ,outsideRth = entryData['outsideRth'], trade_type='TakeProfit' )
+                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
         if(entryData['profit'] == Config.takeProfit[4]):
             loop = asyncio.get_event_loop()
@@ -8802,12 +8818,11 @@ async def sendTpSlSell(connection, entryData):
                                 multiplier_map[Config.takeProfit[4]] = 3  # 3:1
                             multiplier = multiplier_map.get(entryData['profit'], 1)
                             # For LONG position (SELL TP): TP = entry + (multiplier × stop_size)
-                            # Use filled_price for TP calculation (not entry_stop_price) to match stop loss calculation
-                            filled_price = Config.orderFilledPrice.get(entryData['orderId']) or entry_stop_price
-                            price = float(filled_price) + (multiplier * stop_size)
+                            # Use entry price (entry_stop_price), NOT filled price - TP/SL must be calculated from entry trigger price
+                            price = float(entry_stop_price) + (multiplier * stop_size)
                             price = round(price, Config.roundVal)
                             bar_type_name = "Custom" if entryData['barType'] == 'Custom' else "Limit Order"
-                            logging.info(f"{bar_type_name} ATR TP (LONG): entry={filled_price}, stop_size={stop_size} (ATR), multiplier={multiplier}, tp={price}")
+                            logging.info(f"{bar_type_name} ATR TP (LONG): entry={entry_stop_price} (entry price, not filled), stop_size={stop_size} (ATR), multiplier={multiplier}, tp={price}")
                     # Check if this is HOD/LOD stop loss
                     elif stop_loss_type == Config.stopLoss[3] or stop_loss_type == Config.stopLoss[4]:  # HOD or LOD
                         # For HOD/LOD: recalculate stop_size using entry price and LOD/HOD
@@ -8935,12 +8950,11 @@ async def sendTpSlSell(connection, entryData):
                             multiplier_map[Config.takeProfit[4]] = 3  # 3:1
                         multiplier = multiplier_map.get(entryData['profit'], 1)
                         # For LONG position (SELL TP): TP = entry + (multiplier × stop_size)
-                        # Use filled_price for TP calculation (not entry_stop_price) to match stop loss calculation
-                        filled_price = Config.orderFilledPrice.get(entryData['orderId']) or entry_stop_price
-                        price = float(filled_price) + (multiplier * stop_size)
+                        # Use entry price (entry_stop_price), NOT filled price - TP/SL must be calculated from entry trigger price
+                        price = float(entry_stop_price) + (multiplier * stop_size)
                         price = round(price, Config.roundVal)
                         bar_type_name = "Custom" if entryData['barType'] == 'Custom' else "Limit Order"
-                        logging.info(f"{bar_type_name} ATR TP (LONG): entry={filled_price}, stop_size={stop_size} (ATR), multiplier={multiplier}, tp={price}")
+                        logging.info(f"{bar_type_name} ATR TP (LONG): entry={entry_stop_price} (entry price, not filled), stop_size={stop_size} (ATR), multiplier={multiplier}, tp={price}")
                 else:
                     price = get_tp_for_selling(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
 
@@ -9279,8 +9293,8 @@ async def sendTpSlSell(connection, entryData):
                                     Config.entryTradeType[9], Config.entryTradeType[10]]:  # RB, RBB, LB, LB2, LB3
                         logging.warning(f"sendTpSlSell: {bar_type} should have been handled in elif block above, skipping else clause to prevent duplicate stop loss")
                     else:
-                        # For Stop Order: Use entry_stop_price instead of filled_price
-                        base_price = entry_stop_price if entryData.get('barType') == Config.entryTradeType[0] else filled_price
+                        # For Custom/Limit Order: Use entry price (entry_stop_price), NOT filled price - TP/SL must be calculated from entry trigger price
+                        base_price = entry_stop_price if entryData.get('barType') in Config.manualOrderTypes else filled_price
                         stpPrice = get_sl_for_selling(connection, entryData['stopLoss'], base_price, entryData['histData'] , entryData['slValue'], entryData['contract'],  entryData['timeFrame'], chart_Time)
                         logging.info(f"minus 0.01 in stop entry is buying {stpPrice}")
                         stpPrice = stpPrice - 0.01
@@ -9880,10 +9894,10 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
             
             # histData was already fetched earlier for stop loss calculation
             
-            # Generate unique order IDs for bracket orders (using trade-type-specific ranges)
-            parent_order_id = connection.get_next_order_id(barType)
-            tp_order_id = connection.get_next_order_id('TakeProfit')
-            sl_order_id = connection.get_next_order_id('StopLoss')
+            # Generate unique order IDs for bracket orders
+            parent_order_id = connection.get_next_order_id()
+            tp_order_id = connection.get_next_order_id()
+            sl_order_id = connection.get_next_order_id()
             
             logging.info(f"Generated unique order IDs for Conditional Order bracket: entry={parent_order_id}, tp={tp_order_id}, sl={sl_order_id} (barType={barType})")
             

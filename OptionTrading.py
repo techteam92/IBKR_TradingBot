@@ -204,7 +204,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                     entry_price, current_stock_price)
         
         # Create entry order (using OptionEntry trade type for unique ID range)
-        order_id = connection.get_next_order_id('OptionEntry')
+        order_id = connection.get_next_order_id()
         order = Order()
         order.orderId = order_id
         order.action = action
@@ -799,7 +799,7 @@ async def placeOptionEntryOrderFromPending(connection, pending_key, entry_price,
         stock_entry_order_id = params['stock_entry_order_id']
         
         # Create entry order (using OptionEntry trade type for unique ID range)
-        order_id = connection.get_next_order_id('OptionEntry')
+        order_id = connection.get_next_order_id()
         order = Order()
         order.orderId = order_id
         order.action = action
@@ -1098,7 +1098,7 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
         
         # Create and place the conditional order (using OptionStopLoss or OptionProfit trade type)
         trade_type = 'OptionStopLoss' if ord_type_name == 'StopLoss' else 'OptionProfit'
-        order_id = connection.get_next_order_id(trade_type)
+        order_id = connection.get_next_order_id()
         order = Order()
         order.orderId = order_id
         order.action = action
