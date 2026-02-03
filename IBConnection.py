@@ -9,6 +9,36 @@ import Config
 from header import *
 from SendTrade import *
 
+
+def _cancelOptionBracketPair(connection, filled_order_id, ord_type):
+    """
+    When option StopLoss or TakeProfit fills, cancel the other bracket order.
+    Finds the option entry that owns this order and cancels its pair.
+    """
+    try:
+        pair_id = None
+        for oid, odata in list(Config.orderStatusData.items()):
+            if odata.get('ordType') != 'OptionEntry':
+                continue
+            option_orders = odata.get('option_orders', {})
+            if ord_type == 'OptionStopLoss' and option_orders.get('stop_loss') == filled_order_id:
+                pair_id = option_orders.get('profit')
+                break
+            elif ord_type == 'OptionProfit' and option_orders.get('profit') == filled_order_id:
+                pair_id = option_orders.get('stop_loss')
+                break
+        else:
+            return
+        if pair_id is not None:
+            pair_id = int(pair_id)
+            pair_trade = connection.ib.trades().get(pair_id)
+            if pair_trade:
+                connection.cancelTrade(pair_trade.order)
+                logging.info("Cancelled option bracket pair order %s (other leg %s filled)", pair_id, filled_order_id)
+    except Exception as e:
+        logging.warning("Could not cancel option bracket pair for %s: %s", filled_order_id, e)
+
+
 class connection:
 
     def __init__(self):
@@ -16,6 +46,7 @@ class connection:
         self._order_id_lock = threading.Lock()
         self._order_id_counter = None
         self._has_connected = False  # Track if we've ever connected (for proper reconnect)
+        self.account_id = None  # Primary account ID for OCA group orders (avoids Error 10224)
 
     # it will set trade order status value in global variable.
     def orderStatusEvent(self,trade: Trade):
@@ -306,6 +337,38 @@ class connection:
                             regen_err,
                         )
             
+            # Option entry order filled: place option stop loss and take profit orders
+            if trade.orderStatus.status == 'Filled' and ord_type == 'OptionEntry':
+                try:
+                    from OptionTrading import handleOptionEntryFill
+                    handleOptionEntryFill(self, trade.order.orderId)
+                except ImportError:
+                    logging.warning("OptionTrading module not found, skipping option entry fill handling")
+                except Exception as e:
+                    logging.error("Error in handleOptionEntryFill: %s", e)
+
+            # Stock StopLoss/TakeProfit filled: place corresponding option SL/TP if linked
+            if trade.orderStatus.status == 'Filled' and ord_type in ('StopLoss', 'TakeProfit'):
+                try:
+                    from OptionTrading import triggerOptionOrderOnStockFill
+                    triggerOptionOrderOnStockFill(self, trade.order.orderId, ord_type, bar_type)
+                except ImportError:
+                    pass  # OptionTrading not available
+                except Exception as e:
+                    logging.error("Error in triggerOptionOrderOnStockFill: %s", e)
+
+            # Option StopLoss/TakeProfit filled: cancel the other bracket order
+            if trade.orderStatus.status == 'Filled' and ord_type in ('OptionStopLoss', 'OptionProfit'):
+                try:
+                    from OptionTrading import handleOptionTpSlFill
+                    handleOptionTpSlFill(self, trade.order.orderId, ord_type)
+                    # Cancel bracket pair (OptionTrading may not implement this)
+                    _cancelOptionBracketPair(self, trade.order.orderId, ord_type)
+                except ImportError:
+                    _cancelOptionBracketPair(self, trade.order.orderId, ord_type)
+                except Exception as e:
+                    logging.error("Error in handleOptionTpSlFill: %s", e)
+
             # Only call sendTpAndSl when entry order is Filled (not for PendingCancel, Submitted, etc.)
             # This prevents duplicate TP/SL orders when entry order is being updated (cancelled/replaced)
             if should_send_tp_sl and trade.orderStatus.status == 'Filled' and ord_type == 'Entry':
@@ -358,6 +421,18 @@ class connection:
         self.ib.orderStatusEvent += self.orderStatusEvent
         self.pnlEvent = self.pnlData
         self._initialize_order_ids()
+        # Set primary account ID so OCA group orders (TP/SL) use same account and avoid Error 10224
+        if getattr(self.ib, 'accounts', None) and len(self.ib.accounts) > 0:
+            self.account_id = self.ib.accounts[0]
+            logging.info("Primary account_id set to %s for OCA orders", self.account_id)
+        else:
+            try:
+                account_values = self.getAccountValue()
+                if account_values and len(account_values) > 0:
+                    self.account_id = account_values[0].account
+                    logging.info("Primary account_id set from getAccountValue: %s", self.account_id)
+            except Exception as e:
+                logging.warning("Could not set account_id for OCA orders: %s", e)
 
     def _initialize_order_ids(self):
         """

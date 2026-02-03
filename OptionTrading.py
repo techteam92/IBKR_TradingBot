@@ -365,9 +365,19 @@ async def placeOptionEntryOrderImmediately(connection, stock_entry_order_id, sym
         logging.error(traceback.format_exc())
 
 def handleOptionTrading(connection, entryData):
-    """Handle option trading after stock entry fills"""
-    # Implementation needed
-    pass
+    """
+    Handle option trading after stock entry fills.
+    Delegates to handleOptionTradingForEntryFill with stock entry order ID and entry data.
+    """
+    try:
+        stock_entry_order_id = entryData.get('orderId') if isinstance(entryData, dict) else None
+        if stock_entry_order_id:
+            handleOptionTradingForEntryFill(connection, stock_entry_order_id, entryData)
+        else:
+            logging.warning("handleOptionTrading: No orderId in entryData, cannot place option orders")
+    except Exception as e:
+        logging.error("Error in handleOptionTrading: %s", e)
+        logging.error(traceback.format_exc())
 
 def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data):
     """
@@ -388,8 +398,12 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
             barType = entry_data.get('barType')
             buySellType = entry_data.get('userBuySell') or entry_data.get('action')
         
-        # Retrieve option params from Config.option_trade_params
-        if hasattr(Config, 'option_trade_params') and Config.option_trade_params:
+        # Retrieve option params: first from entry_data (passed by sendTpAndSl), else from Config.option_trade_params
+        option_params = None
+        if isinstance(entry_data, dict) and entry_data.get('option_params'):
+            option_params = entry_data.get('option_params')
+            logging.info("Option trading: Using option_params from entryData for %s", symbol)
+        elif hasattr(Config, 'option_trade_params') and Config.option_trade_params:
             matching_key = None
             matching_params = None
             latest_ts = None
@@ -408,11 +422,9 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
                 option_params = matching_params
                 del Config.option_trade_params[matching_key]
                 logging.info("Retrieved option params from Config.option_trade_params for %s", symbol)
-            else:
-                logging.warning("Option trading: No matching option params found for %s", symbol)
-                return
-        else:
-            logging.warning("Option trading: option_trade_params not found or empty")
+        
+        if not option_params or not option_params.get('enabled'):
+            logging.warning("Option trading: No option params found or not enabled for %s", symbol)
             return
         
         # Get prices from entry_data
@@ -1097,7 +1109,7 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
                     ord_type_name, condition_price, current_stock_price)
         
         # Create and place the conditional order (using OptionStopLoss or OptionProfit trade type)
-        trade_type = 'OptionStopLoss' if ord_type_name == 'StopLoss' else 'OptionProfit'
+        trade_type = ord_type_name  # 'OptionStopLoss' or 'OptionProfit' passed by caller
         order_id = connection.get_next_order_id()
         order = Order()
         order.orderId = order_id

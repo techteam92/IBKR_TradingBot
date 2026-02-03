@@ -6239,7 +6239,7 @@ def sendTpAndSl(connection, entryData):
                 symbol = entryData.get('usersymbol', '')
                 timeFrame = entryData.get('timeFrame', '')
                 barType = entryData.get('barType', '')
-                userBuySell = entryData.get('userBuySell', '')
+                userBuySell = entryData.get('userBuySell') or entryData.get('action', '')
                 
                 # Try to find matching option trade parameters
                 option_params = None
@@ -7516,6 +7516,10 @@ def sendStopLoss(connection, entryData,price,action):
             ocaGroup="tp" + str(entryData['orderId']),
             ocaType=1
         )
+        # Explicit account for OCA group (avoids IB Error 10224: same account required)
+        account_id = getattr(connection, 'account_id', None)
+        if account_id:
+            order_kwargs['account'] = account_id
 
         hist_data = entryData.get('histData')
         adjusted_price = round(price, Config.roundVal)
@@ -8289,9 +8293,13 @@ def sendTakeProfit(connection, entryData,price,action):
         is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
         logging.info(f"Sending Take Profit: barType={entryData.get('barType', '')}, action={action}, price={price}, session={session}, is_extended={is_extended}")
         
+        order_kwargs_tp = dict(orderType="LMT", action=action, totalQuantity=entryData['totalQuantity'],
+                              lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1)
+        account_id = getattr(connection, 'account_id', None)
+        if account_id:
+            order_kwargs_tp['account'] = account_id
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
-                                            order=Order(orderType="LMT", action=action,
-                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1), outsideRth=entryData['outsideRth'])
+                                            order=Order(**order_kwargs_tp), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
         if(entryData['profit'] == Config.takeProfit[4]):
             loop = asyncio.get_event_loop()
@@ -8388,9 +8396,13 @@ async def takeProfitThread(connection, entryData,price,action,orderId):
 def updateTakeProfit(connection, entryData,price,action,orderId):
     try:
         logging.info("update BarByBar take profit with new price %s",price)
+        order_kwargs_tp = dict(orderType="LMT", action=action, totalQuantity=entryData['totalQuantity'],
+                              lmtPrice=price, ocaGroup="tp" + str(entryData['orderId']), ocaType=1, orderId=orderId)
+        account_id = getattr(connection, 'account_id', None)
+        if account_id:
+            order_kwargs_tp['account'] = account_id
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
-                                            order=Order(orderType="LMT", action=action,
-                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, ocaGroup="tp" + str(entryData['orderId']), ocaType=1, orderId=orderId) ,outsideRth = entryData['outsideRth'] )
+                                            order=Order(**order_kwargs_tp), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
     except Exception as e:
         logging.error("error in updating take profit %s ", e)
@@ -9593,6 +9605,10 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
     except Exception as e:
         logging.error(f"Error subscribing to market data: {e}")
     
+    # CO1 only: require price to CROSS the threshold after monitoring starts (do not trigger if already in zone)
+    seen_below_co1 = False
+    seen_above_co1 = False
+    
     while True:
         logging.info("conditional_order loop is running..")
         
@@ -9654,65 +9670,69 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
             await asyncio.sleep(1)
             continue
         
-        # Check conditions
+        # Check conditions (require price to CROSS threshold after monitoring started)
         conditions_met = False
         
         if selected_order == "1":
-            # Conditional Order 1: Single condition
-            # If condition is "Below": price must drop TO (reach) the condition_price
-            # If condition is "Above": price must rise TO (reach) the condition_price
+            # Track which side of threshold we've seen (for cross detection)
+            if current_price < condition_price:
+                seen_below_co1 = True
+            if current_price > condition_price:
+                seen_above_co1 = True
+            # Conditional Order 1: Single condition; trigger only on CROSS (not if already in zone)
             if condition == "Below":
-                if current_price <= condition_price:
+                if current_price <= condition_price and seen_above_co1:
                     conditions_met = True
-                    logging.info(f"CO1 condition met: price {current_price} dropped to/below condition_price {condition_price}")
+                    logging.info(f"CO1 condition met (cross): price {current_price} dropped to/below condition_price {condition_price} after having been above")
+                elif current_price <= condition_price:
+                    logging.info(f"CO1 condition not met (no cross yet): price {current_price} is already at/below {condition_price}; waiting for price to go above then cross back")
                 else:
                     logging.info(f"CO1 condition is not satisfying. Current price {current_price} has not reached condition_price {condition_price} yet. Will check again after 1 second.")
             elif condition == "Above":
-                if current_price >= condition_price:
+                if current_price >= condition_price and seen_below_co1:
                     conditions_met = True
-                    logging.info(f"CO1 condition met: price {current_price} rose to/above condition_price {condition_price}")
+                    logging.info(f"CO1 condition met (cross): price {current_price} rose to/above condition_price {condition_price} after having been below")
+                elif current_price >= condition_price:
+                    logging.info(f"CO1 condition not met (no cross yet): price {current_price} is already at/above {condition_price}; waiting for price to go below then cross back")
                 else:
                     logging.info(f"CO1 condition is not satisfying. Current price {current_price} has not reached condition_price {condition_price} yet. Will check again after 1 second.")
         
         elif selected_order == "2":
-            # Conditional Order 2: Either condition can trigger (OR logic)
-            # If condition1 is "Below" and price drops to price1 → trigger
-            # OR if condition2 is "Above" and price rises to price2 → trigger
+            # Conditional Order 2: If one of both conditions is matched, trigger entry order.
+            # Condition "Below" price: trigger when current_price < below price (or <=)
+            # Condition "Above" price: trigger when current_price > above price (or >=)
             cond1_met = False
             cond2_met = False
-            
             # Check condition 1
             if condition1 == "Below":
                 if current_price <= condition_price1:
                     cond1_met = True
-                    logging.info(f"CO2 condition 1 met: price {current_price} dropped to/below condition_price1 {condition_price1}")
+                    logging.info(f"CO2 condition 1 met: price {current_price} at/below condition_price1 {condition_price1}")
                 else:
                     logging.info(f"CO2 condition 1 is not satisfying. Current price {current_price} has not reached condition_price1 {condition_price1} yet.")
             elif condition1 == "Above":
                 if current_price >= condition_price1:
                     cond1_met = True
-                    logging.info(f"CO2 condition 1 met: price {current_price} rose to/above condition_price1 {condition_price1}")
+                    logging.info(f"CO2 condition 1 met: price {current_price} at/above condition_price1 {condition_price1}")
                 else:
                     logging.info(f"CO2 condition 1 is not satisfying. Current price {current_price} has not reached condition_price1 {condition_price1} yet.")
-            
             # Check condition 2
             if condition2 == "Below":
                 if current_price <= condition_price2:
                     cond2_met = True
-                    logging.info(f"CO2 condition 2 met: price {current_price} dropped to/below condition_price2 {condition_price2}")
+                    logging.info(f"CO2 condition 2 met: price {current_price} at/below condition_price2 {condition_price2}")
                 else:
                     logging.info(f"CO2 condition 2 is not satisfying. Current price {current_price} has not reached condition_price2 {condition_price2} yet.")
             elif condition2 == "Above":
                 if current_price >= condition_price2:
                     cond2_met = True
-                    logging.info(f"CO2 condition 2 met: price {current_price} rose to/above condition_price2 {condition_price2}")
+                    logging.info(f"CO2 condition 2 met: price {current_price} at/above condition_price2 {condition_price2}")
                 else:
                     logging.info(f"CO2 condition 2 is not satisfying. Current price {current_price} has not reached condition_price2 {condition_price2} yet.")
-            
-            # Either condition can trigger (OR logic)
+            # One of both conditions matched → trigger entry order (OR logic)
             if cond1_met or cond2_met:
                 conditions_met = True
-                logging.info(f"CO2 condition met (OR logic): cond1={cond1_met}, cond2={cond2_met}, ready to place order")
+                logging.info(f"CO2 condition met (OR): cond1={cond1_met}, cond2={cond2_met}, ready to place order")
         
         # If conditions are met, place the Stop Order using Custom entry logic
         if conditions_met:
