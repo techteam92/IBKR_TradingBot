@@ -28,17 +28,52 @@ async def placeOptionTrade(connection, symbol, option_contract_str, option_expir
     # Implementation needed
     pass
 
+def _is_rth():
+    """Return True if currently in Regular Trading Hours (RTH). Option logic runs only during RTH."""
+    try:
+        from SendTrade import _get_current_session
+        session = _get_current_session()
+        return session not in ('PREMARKET', 'AFTERHOURS', 'OVERNIGHT')
+    except Exception:
+        return True  # Default to allow if session unknown
+
+
+def get_option_params_for_entry(symbol, timeFrame, barType, buySellType):
+    """
+    Return the latest matching option_trade_params for (symbol, timeFrame, barType, buySellType)
+    if enabled; otherwise None. Used to trigger option entry immediately when stock entry is placed.
+    """
+    if not hasattr(Config, 'option_trade_params') or not Config.option_trade_params:
+        return None
+    latest_ts = None
+    matching_params = None
+    for trade_key, params in list(Config.option_trade_params.items()):
+        if not isinstance(trade_key, (tuple, list)) or len(trade_key) < 5:
+            continue
+        key_symbol, key_tf, key_bar, key_side, ts = trade_key[0], trade_key[1], trade_key[2], trade_key[3], trade_key[4]
+        if (key_symbol == symbol and key_tf == timeFrame and key_bar == barType and key_side == buySellType
+                and params.get('enabled')):
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+                matching_params = params
+    return matching_params
+
+
 async def placeOptionTradeAndStore(connection, symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, 
-                          entry_order_type, sl_order_type, tp_order_type, quantity, tif, buy_sell_type, risk_amount=None, stock_entry_order_id=None):
+                          entry_order_type, sl_order_type, tp_order_type, quantity, tif, buy_sell_type, risk_amount=None, stock_entry_order_id=None, outside_rth=False, from_entry_fill=False):
     """
     Place option trade and store order IDs.
+    Option logic runs only during RTH (Regular Trading Hours).
     This function:
     1. Resolves option contract from dropdowns (ATM/OTM, weeks out)
     2. Calculates quantity from risk amount
-    3. Places option entry order as conditional order
-    4. Stores SL/TP parameters for later use
+    3. Places option entry order as conditional order (triggers when stock price crosses entry level)
+    4. Stores SL/TP parameters for when option entry fills
     """
     try:
+        if outside_rth or not _is_rth():
+            logging.info("Option trading only runs during RTH; skipping (outside_rth=%s)", outside_rth)
+            return
         logging.info("placeOptionTradeAndStore: Starting for %s, contract=%s, expire=%s, entry=%s, sl=%s, tp=%s, risk=%s", 
                     symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, risk_amount)
         
@@ -103,22 +138,50 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
             return
         option_contract = qualified[0]
         
-        # Get option prices for quantity calculation and order placement
+        # Get option prices for quantity calculation and order placement.
+        # Option market data often arrives slower than stock; wait up to 5s for valid data.
         option_ticker = connection.ib.reqMktData(option_contract, '', False, False)
-        connection.ib.sleep(0.5)
+        opt_price = None
+        opt_bid = None
+        opt_ask = None
+        max_wait_sec = 5.0
+        check_interval_sec = 0.4
+        waited = 0.0
+        while waited < max_wait_sec:
+            connection.ib.sleep(check_interval_sec)
+            waited += check_interval_sec
+            opt_bid = getattr(option_ticker, "bid", None)
+            opt_ask = getattr(option_ticker, "ask", None)
+            last = getattr(option_ticker, "last", None)
+            close = getattr(option_ticker, "close", None)
+            mark_price = getattr(option_ticker, "markPrice", None)
+            if last is not None and last == last and last > 0:
+                opt_price = last
+                logging.info("Option price from last: %.2f (waited %.1fs)", opt_price, waited)
+                break
+            if opt_bid is not None and opt_ask is not None and opt_bid == opt_bid and opt_ask == opt_ask and opt_bid > 0 and opt_ask > 0:
+                opt_price = (opt_bid + opt_ask) / 2.0
+                logging.info("Option price from bid/ask: %.2f (waited %.1fs)", opt_price, waited)
+                break
+            if close is not None and close == close and close > 0:
+                opt_price = close
+                logging.info("Option price from close: %.2f (waited %.1fs)", opt_price, waited)
+                break
+            if mark_price is not None and mark_price == mark_price and mark_price > 0:
+                opt_price = mark_price
+                logging.info("Option price from mark: %.2f (waited %.1fs)", opt_price, waited)
+                break
+        connection.ib.cancelMktData(option_contract)
+        # Re-read bid/ask for order placement (may have updated)
         opt_bid = getattr(option_ticker, "bid", None)
         opt_ask = getattr(option_ticker, "ask", None)
-        opt_price = None
-        if getattr(option_ticker, "last", None) and getattr(option_ticker, "last", None) > 0:
-            opt_price = getattr(option_ticker, "last", None)
-        elif opt_bid and opt_ask and opt_bid > 0 and opt_ask > 0:
-            opt_price = (opt_bid + opt_ask) / 2.0
-        elif getattr(option_ticker, "close", None) and getattr(option_ticker, "close", None) > 0:
-            opt_price = getattr(option_ticker, "close", None)
-        connection.ib.cancelMktData(option_contract)
+        if opt_bid is not None and isinstance(opt_bid, float) and (opt_bid != opt_bid or opt_bid <= 0):
+            opt_bid = None
+        if opt_ask is not None and isinstance(opt_ask, float) and (opt_ask != opt_ask or opt_ask <= 0):
+            opt_ask = None
         
         if not opt_price or opt_price <= 0:
-            logging.error("Could not get option price for %s", symbol)
+            logging.error("Could not get option price for %s after %.1fs (bid=%s, ask=%s)", symbol, max_wait_sec, opt_bid, opt_ask)
             return
         
         # Calculate quantity from risk amount
@@ -147,10 +210,12 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
             trigger_method = 2  # Breaks below
         
         # Check if current price is already at or beyond entry price
-        # If so, don't place the order yet - store it for monitoring
-        # The order should only trigger when price actually crosses the entry threshold
+        # If so, don't place the order yet - store it for monitoring (unless we're called after stock entry placed/filled).
+        # When from_entry_fill is True, always place immediately (stock entry already triggered or filled).
         should_place_order = True
-        if current_stock_price is not None:
+        if from_entry_fill:
+            should_place_order = True
+        elif current_stock_price is not None:
             if trigger_method == 1:  # Crosses above (BUY)
                 if current_stock_price >= entry_price:
                     # Price is already at or above entry - condition already met
@@ -330,17 +395,21 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         logging.error(traceback.format_exc())
 
 async def placeOptionEntryOrderImmediately(connection, stock_entry_order_id, symbol, entry_price, stop_loss_price, profit_price, 
-                                         option_params, buy_sell_type, entry_data):
+                                         option_params, buy_sell_type, entry_data, outside_rth=False):
     """
     Place option entry order immediately when stock entry order is placed (not waiting for it to fill).
+    Option logic runs only during RTH.
     Option entry order triggers when stock price crosses entry price.
     Option stop loss and take profit orders are placed when option entry fills (not waiting for stock orders to fill).
     """
     try:
+        if outside_rth or not _is_rth():
+            logging.info("Option trading only runs during RTH; skipping placeOptionEntryOrderImmediately (outside_rth=%s)", outside_rth)
+            return
         logging.info("placeOptionEntryOrderImmediately: Placing option entry order for %s, entry=%.2f, sl=%.2f, tp=%.2f", 
                     symbol, entry_price, stop_loss_price, profit_price)
         
-        # Place option entry order immediately
+        # Place option entry order immediately (conditional: if stock crosses entry price, buy option contracts)
         await placeOptionTradeAndStore(
             connection,
             symbol,
@@ -357,6 +426,8 @@ async def placeOptionEntryOrderImmediately(connection, stock_entry_order_id, sym
             buy_sell_type or entry_data.get('action', 'BUY'),
             option_params.get('risk_amount'),
             stock_entry_order_id,
+            outside_rth=outside_rth,
+            from_entry_fill=True,
         )
         logging.info("Option entry order placed immediately for %s (will trigger when stock price crosses %.2f)", 
                     symbol, entry_price)
@@ -445,7 +516,7 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
                     entry_price, entry_data.get('option_entry_price'), entry_data.get('filledPrice'), entry_data.get('lastPrice'))
         
         if entry_price and stop_loss_price and profit_price:
-            # Place option orders asynchronously
+            # Place option orders asynchronously (from_entry_fill=True so we place immediately, not deferred to monitoring)
             asyncio.ensure_future(
                 placeOptionTradeAndStore(
                     connection,
@@ -463,6 +534,7 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
                     buySellType or entry_data.get('action', 'BUY'),
                     option_params.get('risk_amount'),
                     stock_entry_order_id,
+                    from_entry_fill=True,
                 )
             )
             logging.info("Option orders scheduled for %s (entry filled): entry=%s, sl=%s, tp=%s", 
@@ -575,17 +647,26 @@ def triggerOptionOrderOnStockFill(connection, stock_order_id, ord_type, bar_type
         logging.error(traceback.format_exc())
 
 def handleOptionTpSlFill(connection, option_order_id, ord_type):
-    """Handle option TP/SL fill: Cancel the other bracket order"""
+    """Handle option TP/SL fill: Cancel the other bracket order."""
     try:
-        option_data = Config.orderStatusData.get(option_order_id)
-        if not option_data:
-            return
-        
-        bracket_pair_id = option_data.get('bracket_pair_order_id')
-        if bracket_pair_id:
-            # Cancel the other bracket order
-            logging.info("Option %s filled (orderId=%s), cancelling bracket pair order %s", ord_type, option_order_id, bracket_pair_id)
-            # Implementation to cancel order
+        # Find the OptionEntry that has this order in its option_orders (stop_loss or profit)
+        pair_id = None
+        for oid, odata in list(Config.orderStatusData.items()):
+            if odata.get('ordType') != 'OptionEntry':
+                continue
+            option_orders = odata.get('option_orders', {})
+            if ord_type == 'OptionStopLoss' and option_orders.get('stop_loss') == option_order_id:
+                pair_id = option_orders.get('profit')
+                break
+            if ord_type == 'OptionProfit' and option_orders.get('profit') == option_order_id:
+                pair_id = option_orders.get('stop_loss')
+                break
+        if pair_id is not None:
+            pair_id = int(pair_id)
+            pair_trade = connection.ib.trades().get(pair_id)
+            if pair_trade:
+                connection.cancelTrade(pair_trade.order)
+                logging.info("Option %s filled (orderId=%s), cancelled bracket pair order %s", ord_type, option_order_id, pair_id)
     except Exception as e:
         logging.error("Error in handleOptionTpSlFill: %s", e)
         logging.error(traceback.format_exc())

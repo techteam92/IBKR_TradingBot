@@ -164,6 +164,30 @@ def _parse_entry_price(entry_points):
         raise ValueError("Entry price is required for manual orders.")
     return round(price, Config.roundVal)
 
+
+def _trigger_option_entry_after_stock_entry(connection, entry_order_id, symbol, timeFrame, barType, buySellType,
+                                            entry_price, stop_loss_price, profit_price, outsideRth):
+    """
+    If option trading is enabled for this trade, place option entry order immediately
+    (same time as stock entry). Option entry uses same entry/sl/tp prices; quantity = risk / (option_price * 100).
+    """
+    try:
+        from OptionTrading import get_option_params_for_entry, placeOptionEntryOrderImmediately
+        option_params = get_option_params_for_entry(symbol, timeFrame, barType, buySellType)
+        if not option_params or not option_params.get('enabled'):
+            return
+        entry_data = Config.orderStatusData.get(int(entry_order_id))
+        if not entry_data:
+            return
+        asyncio.ensure_future(placeOptionEntryOrderImmediately(
+            connection, int(entry_order_id), symbol, entry_price, stop_loss_price, profit_price,
+            option_params, buySellType, entry_data, outsideRth
+        ))
+        logging.info("Option entry order scheduled for stock entry order %s (%s)", entry_order_id, symbol)
+    except Exception as e:
+        logging.warning("Could not trigger option entry after stock entry: %s", e)
+
+
 def _calculate_manual_stop_loss(connection, contract, entry_price, stop_loss_type, buy_sell_type, time_frame, sl_value):
     """
     Calculate stop loss price for manual orders (Limit Order and Stop Order).
@@ -1238,6 +1262,10 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                                  timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue, breakEven,
                                  outsideRth, False, entry_points)
                     
+                    # Trigger option entry order concurrently with stock entry (same as manual_limit_order / manual_stop_order)
+                    _trigger_option_entry_after_stock_entry(connection, actual_entry_order_id, symbol, timeFrame, barType, buySellType,
+                                                            aux_price, stop_loss_price, tp_price, outsideRth)
+                    
                     # Place TP order with retry logic if order ID is in done state
                     try:
                         logging.info("RB RTH: Placing TP order - orderId=%s, orderType=%s, action=%s, lmtPrice=%s", 
@@ -1528,7 +1556,9 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                     Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
                     Config.orderStatusData[int(entry_response.order.orderId)]['stopLossPrice'] = stop_loss_price
                     logging.info(f"Stored stop_size={stop_size}, stop_loss_price={stop_loss_price} in orderStatusData for LOD/HOD order {entry_response.order.orderId}")
-                
+                tp_offset_lod = stop_size * multiplier_map.get(profit, 1)
+                tp_price_lod = round(entry_stop_price + tp_offset_lod, Config.roundVal) if buySellType == 'BUY' else round(entry_stop_price - tp_offset_lod, Config.roundVal)
+                _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_stop_price, stop_loss_price, tp_price_lod, outsideRth)
                 logging.info("LOD/HOD: Entry STP order placed. TP and SL will be sent automatically after entry fills.")
             except Exception as place_error:
                 logging.error("Error placing LOD/HOD STP order for %s: %s", symbol, place_error)
@@ -1570,7 +1600,7 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                 if stopLoss == Config.stopLoss[1] and int(entry_response.order.orderId) in Config.orderStatusData:  # Only for Custom stop loss
                     Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
                     logging.info(f"Stored stop_size={stop_size} in orderStatusData for Custom stop loss Limit Order {entry_response.order.orderId}")
-                
+                _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
                 logging.info("Extended hours: Entry LMT order placed. TP and SL will be sent automatically after entry fills.")
             except Exception as place_error:
                 logging.error("Error placing limit order for %s: %s", symbol, place_error)
@@ -1631,7 +1661,7 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
             StatusUpdate(entry_response, 'Entry', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
-            
+            _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
             tp_response = connection.placeTrade(contract=contract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
             StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
@@ -2250,7 +2280,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 if is_extended and entry_limit_price is not None:
                     Config.orderStatusData[int(entry_response.order.orderId)]['entryLimitPrice'] = entry_limit_price
                 logging.info(f"Stored stop_size={stop_size} in orderStatusData for order {entry_response.order.orderId}")
-            
+            _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
             logging.info("Extended hours: Entry %s order placed. TP (LMT) and SL (STP LMT) will be sent automatically after entry fills.", order_type)
         else:
             # Regular market hours: Send bracket orders (Entry STP, TP LMT, SL STP)
@@ -2323,7 +2353,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
             StatusUpdate(entry_response, 'Entry', contract, 'STP', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth, False, entry_points)
-            
+            _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
             tp_response = connection.placeTrade(contract=contract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
             logging.info("RTH Stop Order: TP order placed - orderId=%s, status=%s, parentId=%s", 
                          tp_response.order.orderId, tp_response.orderStatus.status, tp_response.order.parentId)
@@ -6909,9 +6939,19 @@ async def sendTpSlBuy(connection, entryData):
                             price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
                             logging.warning(f"Manual Order Custom TP (SHORT): Custom stop loss value missing, using fallback calculation")
                         else:
-                            # stop_size = |entry - custom_stop| + 0.02 (same as entry order calculation)
-                            stop_size = abs(float(entry_stop_price) - custom_stop) + 0.02
+                            # TP is calculated from entry stop price (Entry Custom), not entry limit price
+                            # TP = entry_stop_price ± (multiplier × stop_size)
+                            order_id = entryData.get('orderId')
+                            order_data = Config.orderStatusData.get(order_id) if order_id else None
+                            # Use stored stopSize if available, otherwise recalculate
+                            stored_stop_size = order_data.get('stopSize') if order_data else None
+                            if stored_stop_size is not None and stored_stop_size > 0:
+                                stop_size = stored_stop_size
+                            else:
+                                # stop_size = |entry - custom_stop| + 0.02 (same as entry order calculation)
+                                stop_size = abs(float(entry_stop_price) - custom_stop) + 0.02
                             stop_size = round(stop_size, Config.roundVal)
+                            
                             multiplier_map = {
                                 Config.takeProfit[0]: 1,    # 1:1
                                 Config.takeProfit[1]: 1.5,  # 1.5:1
@@ -6921,10 +6961,10 @@ async def sendTpSlBuy(connection, entryData):
                             if len(Config.takeProfit) > 4:
                                 multiplier_map[Config.takeProfit[4]] = 3  # 3:1
                             multiplier = multiplier_map.get(entryData['profit'], 1)
-                            # For SHORT position (BUY TP): TP = entry - (multiplier × stop_size)
+                            # For SHORT position (BUY TP): TP = entry_stop_price (Entry Custom) - (multiplier × stop_size)
                             price = float(entry_stop_price) - (multiplier * stop_size)
                             price = round(price, Config.roundVal)
-                            logging.info(f"Manual Order Custom TP (SHORT): entry={entry_stop_price}, custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
+                            logging.info(f"Manual Order Custom TP (SHORT): entry_stop_price={entry_stop_price} (Entry Custom), custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
                     # Skip further processing for custom stop loss - price is already set
                     elif entryData['barType'] == 'Custom' and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom entry type with non-Custom, non-ATR stop loss
                         # For Custom entry type in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
@@ -7485,9 +7525,10 @@ async def sendTpSlBuy(connection, entryData):
 def sendMoc(connection, entryData,price,action):
     try:
         print("moc trade sending")
+        # MOC (Market on Close) orders cannot be part of an OCA group per IB API - do not set ocaGroup/ocaType
         mocResponse = connection.placeTrade(contract=entryData['contract'],
                                             order=Order(orderType="MOC", action=action,
-                                                        totalQuantity=entryData['totalQuantity'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1) ,outsideRth = entryData['outsideRth'] )
+                                                        totalQuantity=entryData['totalQuantity']) ,outsideRth = entryData['outsideRth'] )
         StatusUpdate(mocResponse, 'Marketonclose', entryData['contract'], 'MOC', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
     except Exception as e:
         logging.error("error in sending moc trade %s ", e)
@@ -7516,10 +7557,6 @@ def sendStopLoss(connection, entryData,price,action):
             ocaGroup="tp" + str(entryData['orderId']),
             ocaType=1
         )
-        # Explicit account for OCA group (avoids IB Error 10224: same account required)
-        account_id = getattr(connection, 'account_id', None)
-        if account_id:
-            order_kwargs['account'] = account_id
 
         hist_data = entryData.get('histData')
         adjusted_price = round(price, Config.roundVal)
@@ -7865,18 +7902,15 @@ def sendStopLoss(connection, entryData,price,action):
                                     logging.error(f"Custom entry OTH: Error recalculating stop_size from entry and stop price: {e}")
                                     # If recalculation fails for any reason, keep previous manual_stop_size value.
                         
-                        # Limit offset = stop_size * 0.5 (same as entry order uses)
-                        limit_offset = round(manual_stop_size * 0.5, Config.roundVal)
-                        
+                        # Stop-loss limit price = custom entry ± stop_size(ATR) per user spec.
+                        # stop_loss_price is already entry - stop_size (LONG) or entry + stop_size (SHORT).
+                        limit_price = round(stop_loss_price, Config.roundVal)
+
                         if action.upper() == "SELL":
-                            # SELL stop limit: when stop is hit, becomes SELL limit. Limit should be >= stop (above stop)
-                            limit_price = round(stop_loss_price + limit_offset, Config.roundVal)
-                            logging.info(f"Custom entry OTH: SELL stop loss (LONG position): entry={filled_price}, stop={stop_loss_price}, limit={limit_price} (stop + {limit_offset}), stop_size={manual_stop_size}")
+                            logging.info(f"Custom entry OTH: SELL stop loss (LONG position): entry={filled_price}, stop={stop_loss_price}, limit={limit_price} (entry - stop_size={manual_stop_size}), stop_size={manual_stop_size}")
                         else:
-                            # BUY stop limit: when stop is hit, becomes BUY limit. Limit should be <= stop (below stop)
-                            limit_price = round(stop_loss_price - limit_offset, Config.roundVal)
-                            logging.info(f"Custom entry OTH: BUY stop loss (SHORT position): entry={filled_price}, stop={stop_loss_price}, limit={limit_price} (stop - {limit_offset}), stop_size={manual_stop_size}")
-                        
+                            logging.info(f"Custom entry OTH: BUY stop loss (SHORT position): entry={filled_price}, stop={stop_loss_price}, limit={limit_price} (entry + stop_size={manual_stop_size}), stop_size={manual_stop_size}")
+
                         # Update adjusted_price to use calculated stop loss price
                         adjusted_price = round(stop_loss_price, Config.roundVal)
                         order_kwargs['auxPrice'] = adjusted_price
@@ -8293,13 +8327,9 @@ def sendTakeProfit(connection, entryData,price,action):
         is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
         logging.info(f"Sending Take Profit: barType={entryData.get('barType', '')}, action={action}, price={price}, session={session}, is_extended={is_extended}")
         
-        order_kwargs_tp = dict(orderType="LMT", action=action, totalQuantity=entryData['totalQuantity'],
-                              lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1)
-        account_id = getattr(connection, 'account_id', None)
-        if account_id:
-            order_kwargs_tp['account'] = account_id
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
-                                            order=Order(**order_kwargs_tp), outsideRth=entryData['outsideRth'])
+                                            order=Order(orderType="LMT", action=action,
+                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
         if(entryData['profit'] == Config.takeProfit[4]):
             loop = asyncio.get_event_loop()
@@ -8396,13 +8426,9 @@ async def takeProfitThread(connection, entryData,price,action,orderId):
 def updateTakeProfit(connection, entryData,price,action,orderId):
     try:
         logging.info("update BarByBar take profit with new price %s",price)
-        order_kwargs_tp = dict(orderType="LMT", action=action, totalQuantity=entryData['totalQuantity'],
-                              lmtPrice=price, ocaGroup="tp" + str(entryData['orderId']), ocaType=1, orderId=orderId)
-        account_id = getattr(connection, 'account_id', None)
-        if account_id:
-            order_kwargs_tp['account'] = account_id
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
-                                            order=Order(**order_kwargs_tp), outsideRth=entryData['outsideRth'])
+                                            order=Order(orderType="LMT", action=action,
+                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, ocaGroup="tp" + str(entryData['orderId']), ocaType=1, orderId=orderId) ,outsideRth = entryData['outsideRth'] )
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
     except Exception as e:
         logging.error("error in updating take profit %s ", e)
@@ -8800,7 +8826,15 @@ async def sendTpSlSell(connection, entryData):
                         "Extended TP calculation (sell/LONG) %s stop_size=%s multiplier=%s entry_stop_price=%s filled_price=%s price=%s",
                         entryData['contract'], stop_size, multiplier, entry_stop_price, filled_price, price,
                     )
-                    
+                    # Store TP price for option trading (handleOptionTradingForEntryFill) before price = None
+                    entryData['tp_price'] = price
+                    entryData['profit_price'] = price
+                    eid = entryData.get('orderId')
+                    if eid is not None:
+                        if eid not in Config.orderStatusData:
+                            Config.orderStatusData[eid] = {}
+                        Config.orderStatusData[eid]['tp_price'] = price
+                        Config.orderStatusData[eid]['profit_price'] = price
                     # Send TP order directly for RBB/RB/FB/LB/LB2/LB3 - don't fall through to duplicate send
                     logging.info("Sending TP Trade EntryData is %s  and Price is %s  and action is SELL (LONG position)", entryData, price)
                     sendTakeProfit(connection, entryData, price, "SELL")
@@ -8901,9 +8935,19 @@ async def sendTpSlSell(connection, entryData):
                             price = get_tp_for_selling(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
                             logging.warning(f"Manual Order Custom TP (LONG): Custom stop loss value missing, using fallback calculation")
                         else:
-                            # stop_size = |entry - custom_stop| + 0.02 (same as entry order calculation)
-                            stop_size = abs(float(entry_stop_price) - custom_stop) + 0.02
+                            # TP is calculated from entry stop price (Entry Custom), not entry limit price
+                            # TP = entry_stop_price ± (multiplier × stop_size)
+                            order_id = entryData.get('orderId')
+                            order_data = Config.orderStatusData.get(order_id) if order_id else None
+                            # Use stored stopSize if available, otherwise recalculate
+                            stored_stop_size = order_data.get('stopSize') if order_data else None
+                            if stored_stop_size is not None and stored_stop_size > 0:
+                                stop_size = stored_stop_size
+                            else:
+                                # stop_size = |entry - custom_stop| + 0.02 (same as entry order calculation)
+                                stop_size = abs(float(entry_stop_price) - custom_stop) + 0.02
                             stop_size = round(stop_size, Config.roundVal)
+                            
                             multiplier_map = {
                                 Config.takeProfit[0]: 1,    # 1:1
                                 Config.takeProfit[1]: 1.5,  # 1.5:1
@@ -8913,10 +8957,10 @@ async def sendTpSlSell(connection, entryData):
                             if len(Config.takeProfit) > 4:
                                 multiplier_map[Config.takeProfit[4]] = 3  # 3:1
                             multiplier = multiplier_map.get(entryData['profit'], 1)
-                            # For LONG position (SELL TP): TP = entry + (multiplier × stop_size)
+                            # For LONG position (SELL TP): TP = entry_stop_price (Entry Custom) + (multiplier × stop_size)
                             price = float(entry_stop_price) + (multiplier * stop_size)
                             price = round(price, Config.roundVal)
-                            logging.info(f"Manual Order Custom TP (LONG): entry={entry_stop_price}, custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
+                            logging.info(f"Manual Order Custom TP (LONG): entry_stop_price={entry_stop_price} (Entry Custom), custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
                         # Skip further processing for custom stop loss - price is already set
                     elif entryData['barType'] == 'Custom' and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom entry type with non-Custom, non-ATR stop loss
                         # For Custom entry type in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
@@ -9091,6 +9135,15 @@ async def sendTpSlSell(connection, entryData):
                         bar_low = float(histData.get('low', 0))
                         stpPrice = round(bar_low - 0.01, Config.roundVal)
                         logging.info(f"RBB EntryBar stop loss (for LONG): bar_low={bar_low}, stpPrice={stpPrice} (bar_low - 0.01), stop_size={stop_size}, barType={entryData.get('barType')}")
+                        # Store SL price for option trading (handleOptionTradingForEntryFill)
+                        entryData['stop_loss_price'] = stpPrice
+                        entryData['stopLossPrice'] = stpPrice
+                        eid = entryData.get('orderId')
+                        if eid is not None:
+                            if eid not in Config.orderStatusData:
+                                Config.orderStatusData[eid] = {}
+                            Config.orderStatusData[eid]['stop_loss_price'] = stpPrice
+                            Config.orderStatusData[eid]['stopLossPrice'] = stpPrice
                     else:
                         # For other trade types: use entry ± stop_size (existing logic)
                         # In extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
@@ -9367,13 +9420,27 @@ async def sendTpSlSell(connection, entryData):
             # Handle option trading if enabled (using external module)
             try:
                 from OptionTrading import handleOptionTrading
-                # Store calculated prices in entryData for option trading
+                # Store calculated prices in entryData for option trading (RBB sets price=None after sendTakeProfit, so use tp_price)
                 if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
                     entryData['stop_loss_price'] = stpPrice
                 if 'price' in locals() and price and price > 0:
                     entryData['profit_price'] = price
+                elif entryData.get('tp_price') is not None:
+                    entryData['profit_price'] = entryData['tp_price']
                 if 'filled_price' in locals():
                     entryData['filledPrice'] = filled_price
+                eid = entryData.get('orderId')
+                if eid is not None and entryData.get('option_params'):
+                    if entryData.get('tp_price') is not None:
+                        if eid not in Config.orderStatusData:
+                            Config.orderStatusData[eid] = {}
+                        Config.orderStatusData[eid]['tp_price'] = entryData['tp_price']
+                        Config.orderStatusData[eid]['profit_price'] = entryData['tp_price']
+                    if entryData.get('stop_loss_price') is not None:
+                        if eid not in Config.orderStatusData:
+                            Config.orderStatusData[eid] = {}
+                        Config.orderStatusData[eid]['stop_loss_price'] = entryData['stop_loss_price']
+                        Config.orderStatusData[eid]['stopLossPrice'] = entryData['stop_loss_price']
                 handleOptionTrading(connection, entryData)
             except ImportError:
                 logging.warning("OptionTrading module not found, skipping option trading")
@@ -9605,10 +9672,6 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
     except Exception as e:
         logging.error(f"Error subscribing to market data: {e}")
     
-    # CO1 only: require price to CROSS the threshold after monitoring starts (do not trigger if already in zone)
-    seen_below_co1 = False
-    seen_above_co1 = False
-    
     while True:
         logging.info("conditional_order loop is running..")
         
@@ -9670,69 +9733,65 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
             await asyncio.sleep(1)
             continue
         
-        # Check conditions (require price to CROSS threshold after monitoring started)
+        # Check conditions
         conditions_met = False
         
         if selected_order == "1":
-            # Track which side of threshold we've seen (for cross detection)
-            if current_price < condition_price:
-                seen_below_co1 = True
-            if current_price > condition_price:
-                seen_above_co1 = True
-            # Conditional Order 1: Single condition; trigger only on CROSS (not if already in zone)
+            # Conditional Order 1: Single condition
+            # If condition is "Below": price must drop TO (reach) the condition_price
+            # If condition is "Above": price must rise TO (reach) the condition_price
             if condition == "Below":
-                if current_price <= condition_price and seen_above_co1:
+                if current_price <= condition_price:
                     conditions_met = True
-                    logging.info(f"CO1 condition met (cross): price {current_price} dropped to/below condition_price {condition_price} after having been above")
-                elif current_price <= condition_price:
-                    logging.info(f"CO1 condition not met (no cross yet): price {current_price} is already at/below {condition_price}; waiting for price to go above then cross back")
+                    logging.info(f"CO1 condition met: price {current_price} dropped to/below condition_price {condition_price}")
                 else:
                     logging.info(f"CO1 condition is not satisfying. Current price {current_price} has not reached condition_price {condition_price} yet. Will check again after 1 second.")
             elif condition == "Above":
-                if current_price >= condition_price and seen_below_co1:
+                if current_price >= condition_price:
                     conditions_met = True
-                    logging.info(f"CO1 condition met (cross): price {current_price} rose to/above condition_price {condition_price} after having been below")
-                elif current_price >= condition_price:
-                    logging.info(f"CO1 condition not met (no cross yet): price {current_price} is already at/above {condition_price}; waiting for price to go below then cross back")
+                    logging.info(f"CO1 condition met: price {current_price} rose to/above condition_price {condition_price}")
                 else:
                     logging.info(f"CO1 condition is not satisfying. Current price {current_price} has not reached condition_price {condition_price} yet. Will check again after 1 second.")
         
         elif selected_order == "2":
-            # Conditional Order 2: If one of both conditions is matched, trigger entry order.
-            # Condition "Below" price: trigger when current_price < below price (or <=)
-            # Condition "Above" price: trigger when current_price > above price (or >=)
+            # Conditional Order 2: Either condition can trigger (OR logic)
+            # If condition1 is "Below" and price drops to price1 → trigger
+            # OR if condition2 is "Above" and price rises to price2 → trigger
             cond1_met = False
             cond2_met = False
+            
             # Check condition 1
             if condition1 == "Below":
                 if current_price <= condition_price1:
                     cond1_met = True
-                    logging.info(f"CO2 condition 1 met: price {current_price} at/below condition_price1 {condition_price1}")
+                    logging.info(f"CO2 condition 1 met: price {current_price} dropped to/below condition_price1 {condition_price1}")
                 else:
                     logging.info(f"CO2 condition 1 is not satisfying. Current price {current_price} has not reached condition_price1 {condition_price1} yet.")
             elif condition1 == "Above":
                 if current_price >= condition_price1:
                     cond1_met = True
-                    logging.info(f"CO2 condition 1 met: price {current_price} at/above condition_price1 {condition_price1}")
+                    logging.info(f"CO2 condition 1 met: price {current_price} rose to/above condition_price1 {condition_price1}")
                 else:
                     logging.info(f"CO2 condition 1 is not satisfying. Current price {current_price} has not reached condition_price1 {condition_price1} yet.")
+            
             # Check condition 2
             if condition2 == "Below":
                 if current_price <= condition_price2:
                     cond2_met = True
-                    logging.info(f"CO2 condition 2 met: price {current_price} at/below condition_price2 {condition_price2}")
+                    logging.info(f"CO2 condition 2 met: price {current_price} dropped to/below condition_price2 {condition_price2}")
                 else:
                     logging.info(f"CO2 condition 2 is not satisfying. Current price {current_price} has not reached condition_price2 {condition_price2} yet.")
             elif condition2 == "Above":
                 if current_price >= condition_price2:
                     cond2_met = True
-                    logging.info(f"CO2 condition 2 met: price {current_price} at/above condition_price2 {condition_price2}")
+                    logging.info(f"CO2 condition 2 met: price {current_price} rose to/above condition_price2 {condition_price2}")
                 else:
                     logging.info(f"CO2 condition 2 is not satisfying. Current price {current_price} has not reached condition_price2 {condition_price2} yet.")
-            # One of both conditions matched → trigger entry order (OR logic)
+            
+            # Either condition can trigger (OR logic)
             if cond1_met or cond2_met:
                 conditions_met = True
-                logging.info(f"CO2 condition met (OR): cond1={cond1_met}, cond2={cond2_met}, ready to place order")
+                logging.info(f"CO2 condition met (OR logic): cond1={cond1_met}, cond2={cond2_met}, ready to place order")
         
         # If conditions are met, place the Stop Order using Custom entry logic
         if conditions_met:

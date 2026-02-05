@@ -89,7 +89,6 @@ roundVal=2
 
 # Option trading configuration
 optionOrderTypes = ['Market', 'Bid+', 'Ask-']
-option_trade_params = {}
 optionRiskAmount = []
 pending_option_orders = {}  # Store pending orders that couldn't be placed because condition was already met
 
