@@ -64,11 +64,14 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
     """
     Place option trade and store order IDs.
     Option logic runs only during RTH (Regular Trading Hours).
+    When from_entry_fill=True (stock entry just filled):
+    - BUY stock -> option buys call immediately. When stock TP or SL fills -> option sells call.
+    - SELL stock -> option buys put immediately. When stock TP or SL fills -> option sells put.
     This function:
-    1. Resolves option contract from dropdowns (ATM/OTM, weeks out)
+    1. Resolves option contract (call for BUY stock, put for SELL stock; ATM/OTM, weeks out)
     2. Calculates quantity from risk amount
-    3. Places option entry order as conditional order (triggers when stock price crosses entry level)
-    4. Stores SL/TP parameters for when option entry fills
+    3. If from_entry_fill: places option entry immediately (no price condition)
+    4. Stores SL/TP parameters so when stock TP or SL fills we place option sell
     """
     try:
         if outside_rth or not _is_rth():
@@ -199,23 +202,114 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
             except (ValueError, TypeError):
                 logging.warning("Invalid risk amount: %s, using quantity=1", risk_amount)
         
-        # Determine action and trigger method for entry order
-        # For BUY stock: Buy calls when stock crosses above entry_price
-        # For SELL stock: Buy puts when stock crosses below entry_price
-        if buy_sell_type == "BUY":
-            action = "BUY"
-            trigger_method = 1  # Crosses above
-        else:
-            action = "BUY"
-            trigger_method = 2  # Breaks below
+        # Determine action for option entry (always BUY option when stock entry fills)
+        # BUY stock -> buy call. SELL stock -> buy put. (option_right already set above)
+        action = "BUY"
+        # Trigger method only used for conditional orders (when not from_entry_fill)
+        trigger_method = 1 if buy_sell_type == "BUY" else 2  # Crosses above / Breaks below
         
-        # Check if current price is already at or beyond entry price
-        # If so, don't place the order yet - store it for monitoring (unless we're called after stock entry placed/filled).
-        # When from_entry_fill is True, always place immediately (stock entry already triggered or filled).
-        should_place_order = True
+        # When from_entry_fill: stock entry just filled -> place option entry IMMEDIATELY (no price condition).
+        # Option uses the same stop size as the stock. BUY stock -> option buys call. SELL stock -> option buys put.
+        # Option exit is when stock TP or SL order fills (price crosses TP or SL, same as stock logic).
         if from_entry_fill:
-            should_place_order = True
-        elif current_stock_price is not None:
+            # Place option entry immediately: buy call (long) or buy put (short)
+            order_id = connection.get_next_order_id()
+            order = Order()
+            order.orderId = order_id
+            order.action = action
+            order.totalQuantity = option_quantity
+            order.tif = tif
+            if entry_order_type == 'Market':
+                order.orderType = 'MKT'
+                order.lmtPrice = 0.0
+            elif entry_order_type == 'Bid+':
+                order.orderType = 'LMT'
+                order.lmtPrice = round(opt_bid, 2) if (opt_bid and opt_bid > 0) else (round(opt_price, 2) if opt_price else 0.01)
+            elif entry_order_type == 'Ask-':
+                order.orderType = 'LMT'
+                order.lmtPrice = round(opt_ask, 2) if (opt_ask and opt_ask > 0) else (round(opt_price, 2) if opt_price else 0.01)
+            else:
+                order.orderType = 'MKT'
+                order.lmtPrice = 0.0
+            order.conditions = []
+            order.conditionsIgnoreRth = False
+            trade = connection.placeTrade(option_contract, order, outsideRth=False)
+            if not trade:
+                logging.error("Failed to place option entry order (immediate)")
+                return
+            option_entry_order_id = trade.order.orderId
+            logging.info("Option entry placed immediately (stock entry filled): %s %d %s, orderId=%s",
+                        action, option_quantity, "call" if option_right == 'C' else "put", option_entry_order_id)
+            # Store order data and SL/TP params (option exit when stock TP or SL fills)
+            if option_entry_order_id not in Config.orderStatusData:
+                Config.orderStatusData[option_entry_order_id] = {}
+            Config.orderStatusData[option_entry_order_id].update({
+                'contract': option_contract,
+                'action': action,
+                'totalQuantity': option_quantity,
+                'type': entry_order_type,
+                'tif': tif,
+                'ordType': 'OptionEntry',
+                'usersymbol': symbol,
+                'option_contract': option_contract,
+                'option_quantity': option_quantity,
+                'option_tif': tif,
+                'option_symbol': symbol,
+                'stock_exchange': stock_exchange,
+                'stock_contract': stock_contract,
+                'opt_bid': opt_bid,
+                'opt_ask': opt_ask,
+                'opt_price': opt_price,
+            })
+            sl_action = "SELL"
+            Config.orderStatusData[option_entry_order_id]['option_sl_params'] = {
+                'action': sl_action,
+                'order_type': sl_order_type,
+                'condition_price': stop_loss_price,
+                'trigger_method': 2,
+            }
+            Config.orderStatusData[option_entry_order_id]['option_tp_params'] = {
+                'action': sl_action,
+                'order_type': tp_order_type,
+                'condition_price': profit_price,
+                'trigger_method': 1 if buy_sell_type == "BUY" else 2,
+            }
+            if stock_entry_order_id:
+                if stock_entry_order_id not in Config.orderStatusData:
+                    Config.orderStatusData[stock_entry_order_id] = {}
+                if 'option_orders' not in Config.orderStatusData[stock_entry_order_id]:
+                    Config.orderStatusData[stock_entry_order_id]['option_orders'] = {}
+                Config.orderStatusData[stock_entry_order_id]['option_orders']['entry'] = option_entry_order_id
+                # Race: stock TP/SL can fill in same second as entry before option is placed. If already filled, trigger option exit now.
+                option_entry_data = Config.orderStatusData.get(option_entry_order_id)
+                for oid, odata in list(Config.orderStatusData.items()):
+                    ed = odata.get('entryData')
+                    if not isinstance(ed, dict) or ed.get('orderId') != stock_entry_order_id:
+                        continue
+                    ord_type = odata.get('ordType')
+                    status = odata.get('status')
+                    if ord_type == 'TakeProfit' and status == 'Filled' and option_entry_data:
+                        tp_params = option_entry_data.get('option_tp_params')
+                        if tp_params:
+                            logging.info("Stock take profit already Filled when option entry placed (stock orderId=%s) -> Placing option exit now", oid)
+                            asyncio.ensure_future(
+                                placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
+                            )
+                    elif ord_type == 'StopLoss' and status == 'Filled' and option_entry_data:
+                        sl_params = option_entry_data.get('option_sl_params')
+                        if sl_params:
+                            logging.info("Stock stop loss already Filled when option entry placed (stock orderId=%s) -> Placing option exit now", oid)
+                            asyncio.ensure_future(
+                                placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
+                            )
+            logging.info("Option entry order placed and stored: orderId=%s, stock_entry_order_id=%s",
+                        option_entry_order_id, stock_entry_order_id)
+            return
+        
+        # Not from_entry_fill: legacy conditional path (e.g. when option is placed before stock fills)
+        # Check if current price is already at or beyond entry price
+        should_place_order = True
+        if current_stock_price is not None:
             if trigger_method == 1:  # Crosses above (BUY)
                 if current_stock_price >= entry_price:
                     # Price is already at or above entry - condition already met
@@ -548,8 +642,10 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
 
 def handleOptionEntryFill(connection, option_entry_order_id):
     """
-    Handle option entry order fill: Place stop loss and take profit orders immediately.
-    These orders trigger when stock price reaches stop loss or take profit (not waiting for stock orders to fill).
+    Handle option entry order fill: Do NOT place stop loss and take profit orders immediately.
+    Option SL/TP orders will be placed only when the corresponding stock SL/TP orders fill
+    (via triggerOptionOrderOnStockFill), not when stock price reaches a level.
+    This prevents premature fills due to conditional order issues.
     """
     try:
         option_data = Config.orderStatusData.get(option_entry_order_id)
@@ -557,25 +653,10 @@ def handleOptionEntryFill(connection, option_entry_order_id):
             logging.warning("Option entry order %s not found in orderStatusData", option_entry_order_id)
             return
         
-        # Get stop loss and take profit parameters
-        sl_params = option_data.get('option_sl_params')
-        tp_params = option_data.get('option_tp_params')
+        # Option SL/TP orders will be placed when stock SL/TP orders fill, not immediately
+        # This ensures they only trigger when the actual stock orders fill, not based on price conditions
+        logging.info("Option entry order %s filled. Option SL/TP orders will be placed when stock SL/TP orders fill (not immediately).", option_entry_order_id)
         
-        if sl_params:
-            logging.info("Option entry order %s filled. Placing option stop loss order immediately (triggers when stock price reaches stop loss).", option_entry_order_id)
-            asyncio.ensure_future(
-                placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
-            )
-        else:
-            logging.warning("Option stop loss parameters not found for option entry order %s", option_entry_order_id)
-        
-        if tp_params:
-            logging.info("Option entry order %s filled. Placing option take profit order immediately (triggers when stock price reaches take profit).", option_entry_order_id)
-            asyncio.ensure_future(
-                placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
-            )
-        else:
-            logging.warning("Option take profit parameters not found for option entry order %s", option_entry_order_id)
     except Exception as e:
         logging.error("Error in handleOptionEntryFill: %s", e)
         logging.error(traceback.format_exc())
@@ -583,7 +664,13 @@ def handleOptionEntryFill(connection, option_entry_order_id):
 def triggerOptionOrderOnStockFill(connection, stock_order_id, ord_type, bar_type):
     """
     Trigger option orders when stock orders fill.
-    - If stock stop loss or profit fills: Place corresponding option stop loss or profit orders
+
+    Option entry is NOT tied to stock SL/TP; it uses the same stop size as the stock
+    and is triggered only when stock ENTRY fills.
+
+    Option exit: when stock TP order fills (price crossed over TP = entry + mult*stop_size),
+    place option take-profit exit. When stock SL order fills (price crossed below SL = entry - stop_size),
+    place option stop-loss exit. Same logic as stock; for SELL stock the directions are opposite.
     """
     try:
         if ord_type not in ('StopLoss', 'TakeProfit'):
@@ -626,19 +713,25 @@ def triggerOptionOrderOnStockFill(connection, stock_order_id, ord_type, bar_type
             return
         
         # Get the appropriate parameters based on ord_type
+        # IMPORTANT: This function is ONLY called when stock TP/SL orders actually FILL
+        # Option exit orders are placed as immediate market orders (not conditional on stock price)
         if ord_type == 'StopLoss':
             sl_params = option_entry_data.get('option_sl_params')
             if not sl_params:
+                logging.warning("Stock stop loss filled (orderId=%s) but option_sl_params not found for option entry %s", 
+                              stock_order_id, option_entry_order_id)
                 return
-            logging.info("Stock stop loss filled (orderId=%s), placing option stop loss order", stock_order_id)
+            logging.info("Stock stop loss ORDER FILLED (orderId=%s) -> Placing IMMEDIATE option exit order (SELL call/put)", stock_order_id)
             asyncio.ensure_future(
                 placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
             )
         elif ord_type == 'TakeProfit':
             tp_params = option_entry_data.get('option_tp_params')
             if not tp_params:
+                logging.warning("Stock take profit filled (orderId=%s) but option_tp_params not found for option entry %s", 
+                              stock_order_id, option_entry_order_id)
                 return
-            logging.info("Stock take profit filled (orderId=%s), placing option take profit order", stock_order_id)
+            logging.info("Stock take profit ORDER FILLED (orderId=%s) -> Placing IMMEDIATE option exit order (SELL call/put)", stock_order_id)
             asyncio.ensure_future(
                 placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
             )
@@ -663,7 +756,22 @@ def handleOptionTpSlFill(connection, option_order_id, ord_type):
                 break
         if pair_id is not None:
             pair_id = int(pair_id)
-            pair_trade = connection.ib.trades().get(pair_id)
+            # Get trades - handle both dict-like and list returns
+            trades = connection.ib.trades()
+            pair_trade = None
+            if isinstance(trades, dict) or (hasattr(trades, 'get') and hasattr(trades, '__contains__')):
+                # Dict-like object - try to get by order ID
+                try:
+                    if pair_id in trades:
+                        pair_trade = trades[pair_id] if isinstance(trades, dict) else trades.get(pair_id)
+                except (TypeError, KeyError):
+                    pass
+            elif isinstance(trades, list):
+                # List - find trade with matching order ID
+                for trade in trades:
+                    if hasattr(trade, 'order') and hasattr(trade.order, 'orderId') and trade.order.orderId == pair_id:
+                        pair_trade = trade
+                        break
             if pair_trade:
                 connection.cancelTrade(pair_trade.order)
                 logging.info("Option %s filled (orderId=%s), cancelled bracket pair order %s", ord_type, option_order_id, pair_id)
@@ -1140,6 +1248,10 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
     """
     Place option stop loss or take profit order when corresponding stock order fills.
     This function is called from triggerOptionOrderOnStockFill.
+    
+    IMPORTANT: This function places IMMEDIATE market orders (no price conditions).
+    It is ONLY called when stock TP/SL orders actually FILL, not when stock price reaches those levels.
+    Option exit orders are NOT conditional orders based on stock price.
     """
     try:
         option_data = Config.orderStatusData.get(option_entry_order_id)
@@ -1183,11 +1295,11 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
         condition_price = params.get('condition_price')
         trigger_method = params.get('trigger_method')
         
-        # Always use exact condition_price from stock trade
-        # Stop loss: If SPY breaks below 680.30, sell X contracts
-        # Take profit: If SPY crosses 680.78, sell X contracts
-        logging.info("Option %s: Using exact condition_price=%.2f for conditional order (current_price=%.2f)", 
-                    ord_type_name, condition_price, current_stock_price)
+        # Note: condition_price is stored for reference only (from stock TP/SL order)
+        # Option exit orders are placed IMMEDIATELY as market orders when stock TP/SL orders fill
+        # They are NOT conditional orders based on stock price
+        logging.info("Option %s: Stock %s order filled, placing immediate option exit order (stock TP/SL price was %.2f, current_price=%.2f)", 
+                    ord_type_name, ord_type_name.replace('Option', ''), condition_price, current_stock_price)
         
         # Create and place the conditional order (using OptionStopLoss or OptionProfit trade type)
         trade_type = ord_type_name  # 'OptionStopLoss' or 'OptionProfit' passed by caller
@@ -1221,27 +1333,26 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
             logging.error("Unknown option order type: %s", order_type)
             return
         
-        # Create condition: Monitor stock price
-        condition = PriceCondition(
-            price=condition_price,
-            triggerMethod=trigger_method,
-            conId=stock_contract.conId,
-            exch=stock_exchange
-        )
-        order.conditions = [condition]
+        # When called from triggerOptionOrderOnStockFill (stock SL/TP filled), place market order immediately
+        # Do NOT use conditional orders - they can trigger incorrectly based on price spikes
+        # Place market order directly since stock SL/TP has already filled
+        order.conditions = []  # No conditions - place immediately as market order
         order.conditionsIgnoreRth = False
         
-        # Place the conditional order
+        # If order_type is Market, ensure it's a market order
+        if order_type == 'Market':
+            order.orderType = 'MKT'
+            order.lmtPrice = 0.0
+        
+        # Place the order immediately (not conditional)
         try:
             trade = connection.placeTrade(option_contract, order, outsideRth=False)
             if trade:
                 initial_limit_price = order.lmtPrice if order.orderType == 'LMT' else None
                 
                 logging.info(
-                    "Option %s conditional order placed: If %s %s %.2f, then %s %d contracts (%s), orderId=%s",
-                    ord_type_name, symbol,
-                    "crosses above" if trigger_method == 1 else "breaks below", condition_price,
-                    action, quantity, order_type, order_id
+                    "Option %s order placed immediately (stock %s filled): %s %d contracts (%s), orderId=%s",
+                    ord_type_name, ord_type_name.replace('Option', ''), action, quantity, order_type, order_id
                 )
                 
                 # Store order data
@@ -1275,7 +1386,7 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
                 
                 return trade
         except Exception as e:
-            logging.error("Error placing conditional option order: %s", e)
+            logging.error("Error placing option %s order: %s", ord_type_name, e)
             logging.error(traceback.format_exc())
             return None
     except Exception as e:

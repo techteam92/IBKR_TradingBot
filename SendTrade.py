@@ -1284,7 +1284,7 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                             logging.error("RB RTH: Error placing TP order: %s", e)
                             raise
                     StatusUpdate(tp_response, 'TakeProfit', ibContract, 'LMT', tradeType, quantity, histData, lastPrice, symbol,
-                                 timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                                 timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                                  breakEven, outsideRth)
                     
                     # Place SL order with retry logic if order ID is in done state
@@ -1664,7 +1664,7 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
             _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
             tp_response = connection.placeTrade(contract=contract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
             StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
-                         timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                         timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
             
             sl_response = connection.placeTrade(contract=contract, order=sl_order, outsideRth=outsideRth, trade_type='StopLoss')
@@ -2358,7 +2358,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
             logging.info("RTH Stop Order: TP order placed - orderId=%s, status=%s, parentId=%s", 
                          tp_response.order.orderId, tp_response.orderStatus.status, tp_response.order.parentId)
             StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
-                         timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                         timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
             
             sl_response = connection.placeTrade(contract=contract, order=sl_order, outsideRth=outsideRth, trade_type='StopLoss')
@@ -3383,7 +3383,7 @@ async def lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
                         logging.error("LB1 RTH: Error placing TP order: %s", e)
                         raise
                 StatusUpdate(tp_response, 'TakeProfit', ibContract, 'LMT', tradeType, quantity, histData, lastPrice, symbol,
-                             timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
+                             timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                              breakEven, outsideRth)
                 
                 # Place SL order with retry logic if order ID is in done state
@@ -6966,6 +6966,40 @@ async def sendTpSlBuy(connection, entryData):
                             price = round(price, Config.roundVal)
                             logging.info(f"Manual Order Custom TP (SHORT): entry_stop_price={entry_stop_price} (Entry Custom), custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
                     # Skip further processing for custom stop loss - price is already set
+                    elif entryData['barType'] == 'Custom' and stop_loss_type in Config.atrStopLossMap:  # Custom entry type with ATR stop loss
+                        # For Custom entry type with ATR stop loss: use stored stop_size or recalculate ATR
+                        order_id = entryData.get('orderId')
+                        order_data = Config.orderStatusData.get(order_id) if order_id else None
+                        stored_stop_size = order_data.get('stopSize') if order_data else None
+                        
+                        if stored_stop_size is not None and stored_stop_size > 0:
+                            stop_size = stored_stop_size
+                        else:
+                            # Recalculate ATR stop_size if not stored
+                            atr_offset = _get_atr_stop_offset(connection, entryData['contract'], stop_loss_type)
+                            if atr_offset is not None and atr_offset > 0:
+                                stop_size = atr_offset
+                            else:
+                                stop_size = None
+                        
+                        if stop_size is not None and stop_size > 0:
+                            multiplier_map = {
+                                Config.takeProfit[0]: 1,    # 1:1
+                                Config.takeProfit[1]: 1.5,  # 1.5:1
+                                Config.takeProfit[2]: 2,    # 2:1
+                                Config.takeProfit[3]: 2.5,  # 2.5:1
+                            }
+                            if len(Config.takeProfit) > 4:
+                                multiplier_map[Config.takeProfit[4]] = 3  # 3:1
+                            multiplier = multiplier_map.get(entryData['profit'], 1)
+                            # For SHORT position (BUY TP): TP = entry - (multiplier × stop_size)
+                            price = float(entry_stop_price) - (multiplier * stop_size)
+                            price = round(price, Config.roundVal)
+                            logging.info(f"Manual Order Custom+ATR TP (SHORT): entry={entry_stop_price}, stop_size={stop_size} (ATR, {'stored' if stored_stop_size else 'recalculated'}), stopLoss={stop_loss_type}, multiplier={multiplier}, tp={price}")
+                        else:
+                            # Fallback to regular calculation if ATR unavailable
+                            logging.warning(f"Manual Order Custom+ATR TP (SHORT): ATR stop_size unavailable, using fallback calculation")
+                            price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
                     elif entryData['barType'] == 'Custom' and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom entry type with non-Custom, non-ATR stop loss
                         # For Custom entry type in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
                         order_id = entryData.get('orderId')
@@ -7018,7 +7052,7 @@ async def sendTpSlBuy(connection, entryData):
 
             # Ensure price is set before sending TP
             if price == 0 or price is None:
-                logging.warning("Manual Order: TP price is 0 or None, checking if custom stop loss. barType=%s, stopLoss=%s", 
+                logging.warning("Manual Order: TP price is 0 or None, checking fallback options. barType=%s, stopLoss=%s", 
                                entryData.get('barType'), entryData.get('stopLoss'))
                 # Try to calculate fallback TP for custom stop loss
                 if entryData.get('barType') in Config.manualOrderTypes and entryData.get('stopLoss') == Config.stopLoss[1]:
@@ -7044,6 +7078,43 @@ async def sendTpSlBuy(connection, entryData):
                     else:
                         logging.error("Manual Order Custom: Cannot calculate fallback TP - custom_stop=%s, entry_stop_price=%s", 
                                     custom_stop, entry_stop_price)
+                        price = None
+                # Try to calculate fallback TP for Custom barType + ATR stop loss
+                elif entryData.get('barType') == 'Custom' and entryData.get('stopLoss') in Config.atrStopLossMap:
+                    # Try to get stored stop_size first
+                    order_id = entryData.get('orderId')
+                    order_data = Config.orderStatusData.get(order_id) if order_id else None
+                    stored_stop_size = order_data.get('stopSize') if order_data else None
+                    
+                    if stored_stop_size is not None and stored_stop_size > 0:
+                        stop_size = stored_stop_size
+                    else:
+                        # Recalculate ATR stop_size
+                        atr_offset = _get_atr_stop_offset(connection, entryData['contract'], entryData.get('stopLoss'))
+                        if atr_offset is not None and atr_offset > 0:
+                            stop_size = atr_offset
+                        else:
+                            stop_size = None
+                    
+                    if stop_size is not None and stop_size > 0 and entry_stop_price > 0:
+                        multiplier_map = {
+                            Config.takeProfit[0]: 1,    # 1:1
+                            Config.takeProfit[1]: 1.5,  # 1.5:1
+                            Config.takeProfit[2]: 2,    # 2:1
+                            Config.takeProfit[3]: 2.5,  # 2.5:1
+                        }
+                        if len(Config.takeProfit) > 4:
+                            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
+                        multiplier = multiplier_map.get(entryData.get('profit'), 2.0)  # Default 2:1
+                        # For SHORT position (BUY TP): TP = entry - (multiplier × stop_size)
+                        price = float(entry_stop_price) - (multiplier * stop_size)
+                        price = round(price, Config.roundVal)
+                        source = 'stored' if stored_stop_size else 'recalculated'
+                        logging.warning("Manual Order Custom+ATR: Recalculated TP using fallback: entry=%s, stop_size=%s (ATR, %s), multiplier=%s, price=%s", 
+                                      entry_stop_price, stop_size, source, multiplier, price)
+                    else:
+                        logging.error("Manual Order Custom+ATR: Cannot calculate fallback TP - stop_size=%s, entry_stop_price=%s", 
+                                    stop_size, entry_stop_price)
                         price = None
                 else:
                     logging.error("Manual Order: Cannot calculate TP, skipping TP order. barType=%s, stopLoss=%s", 
@@ -7489,14 +7560,7 @@ async def sendTpSlBuy(connection, entryData):
                 logging.error("sendTpSlBuy: Skipping SL order due to invalid price=%s, barType=%s, orderId=%s", 
                             stpPrice, entryData.get('barType'), entryData.get('orderId'))
             
-            # MOC (Market on Close) orders should only be sent during regular trading hours, not in premarket/extended hours
-            # Only send MOC if we're in regular trading hours (not outsideRth)
-            if not entryData.get('outsideRth', False):
-                mocPrice = 0
-                logging.info("Sending Moc Order  of %s price (RTH only)", mocPrice)
-                sendMoc(connection,entryData,mocPrice,"BUY")
-            else:
-                logging.info("Skipping MOC order for premarket/extended hours trade (outsideRth=True)")
+            # MOC order removed per user request
             
             # Handle option trading if enabled (using external module)
             try:
@@ -7549,12 +7613,14 @@ def sendStopLoss(connection, entryData,price,action):
             raise ValueError(f"Invalid price parameter: {price}")
         
         order_type = "STP"
+        parent_id = entryData.get('orderId')
         order_kwargs = dict(
             orderType="STP",
             action=action,
             totalQuantity=entryData['totalQuantity'],
             tif=entryData['tif'],
-            ocaGroup="tp" + str(entryData['orderId']),
+            parentId=parent_id,
+            ocaGroup="tp" + str(parent_id),
             ocaType=1
         )
 
@@ -8327,9 +8393,11 @@ def sendTakeProfit(connection, entryData,price,action):
         is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
         logging.info(f"Sending Take Profit: barType={entryData.get('barType', '')}, action={action}, price={price}, session={session}, is_extended={is_extended}")
         
+        parent_id = entryData.get('orderId')
         lmtResponse = connection.placeTrade(contract=entryData['contract'],
                                             order=Order(orderType="LMT", action=action,
-                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'], ocaGroup="tp" + str(entryData['orderId']), ocaType=1), outsideRth=entryData['outsideRth'])
+                                                        totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'],
+                                                        parentId=parent_id, ocaGroup="tp" + str(parent_id), ocaType=1), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
         if(entryData['profit'] == Config.takeProfit[4]):
             loop = asyncio.get_event_loop()
@@ -9408,14 +9476,7 @@ async def sendTpSlSell(connection, entryData):
                     logging.error("sendTpSlSell: Exception in sendStopLoss: %s", e)
                     logging.error("sendTpSlSell: Traceback: %s", traceback.format_exc())
                 traceback.print_exc()
-            # MOC (Market on Close) orders should only be sent during regular trading hours, not in premarket/extended hours
-            # Only send MOC if we're in regular trading hours (not outsideRth)
-            if not entryData.get('outsideRth', False):
-                mocPrice = 0
-                logging.info("Sending Moc Order  of %s price (RTH only)", mocPrice)
-                sendMoc(connection, entryData, mocPrice, "SELL")
-            else:
-                logging.info("Skipping MOC order for premarket/extended hours trade (outsideRth=True)")
+            # MOC order removed per user request
             
             # Handle option trading if enabled (using external module)
             try:

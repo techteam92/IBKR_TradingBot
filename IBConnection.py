@@ -31,7 +31,22 @@ def _cancelOptionBracketPair(connection, filled_order_id, ord_type):
             return
         if pair_id is not None:
             pair_id = int(pair_id)
-            pair_trade = connection.ib.trades().get(pair_id)
+            # Get trades - handle both dict-like and list returns
+            trades = connection.ib.trades()
+            pair_trade = None
+            if isinstance(trades, dict) or (hasattr(trades, 'get') and hasattr(trades, '__contains__')):
+                # Dict-like object - try to get by order ID
+                try:
+                    if pair_id in trades:
+                        pair_trade = trades[pair_id] if isinstance(trades, dict) else trades.get(pair_id)
+                except (TypeError, KeyError):
+                    pass
+            elif isinstance(trades, list):
+                # List - find trade with matching order ID
+                for trade in trades:
+                    if hasattr(trade, 'order') and hasattr(trade.order, 'orderId') and trade.order.orderId == pair_id:
+                        pair_trade = trade
+                        break
             if pair_trade:
                 connection.cancelTrade(pair_trade.order)
                 logging.info("Cancelled option bracket pair order %s (other leg %s filled)", pair_id, filled_order_id)
