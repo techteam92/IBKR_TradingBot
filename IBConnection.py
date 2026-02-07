@@ -775,6 +775,11 @@ class connection:
                         logging.warning("Could not remove existing Trade for orderId %s: %s", old_order_id, e)
         except Exception as e:
             logging.debug("Error checking existing trades: %s (this is usually fine)", e)
+
+        # OCA group orders (TP/SL) must have the same account to avoid Error 10224
+        if getattr(order, 'ocaGroup', None) and self.account_id:
+            order.account = self.account_id
+            logging.debug("placeTrade: set order.account=%s for OCA group '%s'", self.account_id, order.ocaGroup)
         
         try:
             response = self.ib.placeOrder(contract=contract, order=order)
