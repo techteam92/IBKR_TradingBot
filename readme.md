@@ -1,4 +1,4 @@
-# 🧭 TWS Trading BOT : P-729
+# 🧭 TWS Trading BOT
 
 A desktop trading application that connects to Interactive Brokers (TWS/IB Gateway), with a tkinter GUI and REST API for placing orders, managing positions, and automated stop-loss/take-profit in premarket and postmarket.
 
