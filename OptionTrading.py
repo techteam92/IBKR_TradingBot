@@ -125,11 +125,8 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         # Resolve expiration date from weeks out
         expiry_weeks = int(option_expire) if option_expire else 0
         today = datetime.date.today()
-        # Find next Friday (weekly options expire on Friday)
+        # Find this week's Friday (weekly options expire on Friday). 0 = current week = this Friday.
         days_until_friday = (4 - today.weekday()) % 7
-        if days_until_friday == 0 and today.weekday() == 4:
-            # If today is Friday, use next Friday
-            days_until_friday = 7
         target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
         expiration_date = target_date.strftime("%Y%m%d")
         
