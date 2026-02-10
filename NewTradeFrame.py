@@ -23,6 +23,7 @@ row_async_tasks = []
 replayEnabled = []  # Track replay state for each row
 replayButtonList = []  # Track replay buttons for each row
 optionEnabled = []  # Track option trading state for each row
+optionButtonList = []  # Store Option button reference for each row (for bg update)
 optionContract = []  # Store option contract (strike selection code) for each row
 optionExpire = []  # Store option expiration selection (weeks out or YYYYMMDD) for each row
 optionEntryOrderType = []  # Store option entry order type for each row
@@ -448,10 +449,21 @@ def NewTradeFrame(frame,connection):
     addButton = Frame(scrollable_frame)
     Button(addButton, width="15", height="1", text="ADD", command=add).pack( side = BOTTOM)
     addButton.pack( side = BOTTOM)
+    # Log that all trading row elements are displayed (for debugging visibility, e.g. Option button)
+    _log_ui_elements_displayed()
     # addButtonbt.place(relx=0.5, rely=0.3, anchor=CENTER)
     # global managePositionButton
     # managePositionButton = Button(frame, width="15", height="1", text="Manage Position", command=openManagePosition)
     # managePositionButton.place(relx=0.7, rely=0.3, anchor=CENTER)
+
+
+def _log_ui_elements_displayed():
+    """Log that all trading row UI elements are present (Symbol through Option, Status)."""
+    elements = [
+        "Symbol", "Stop Loss", "Trade Type", "Buy/Sell", "Execute", "Risk", "Profit",
+        "Time Frame", "Time In Force", "Replay", "Break Even", "Option", "Status"
+    ]
+    logging.info("UI: All elements displayed: %s", ", ".join(elements))
 
 
 def _get_current_session():
@@ -648,12 +660,17 @@ def toggle_replay(row_index):
 
 
 def _toggle_option_fields(row_index):
-    """Show/hide option configuration modal when option checkbox is toggled"""
+    """Show/hide option configuration modal when option button is clicked"""
     if row_index < len(optionEnabled):
         optionEnabled[row_index] = not optionEnabled[row_index]
         if optionEnabled[row_index]:
             # Show option configuration modal
             _show_option_config_modal(row_index)
+            # Update button appearance after modal closes (green if OK, gray if Cancel)
+            if row_index < len(optionButtonList) and optionButtonList[row_index]:
+                optionButtonList[row_index].config(
+                    bg='#90EE90' if optionEnabled[row_index] else '#D3D3D3'
+                )
         else:
             # Clear option fields when disabled
             if row_index < len(optionContract):
@@ -666,6 +683,8 @@ def _toggle_option_fields(row_index):
                 optionStopLossOrderType[row_index].set("Market")
             if row_index < len(optionProfitOrderType):
                 optionProfitOrderType[row_index].set("Market")
+            if row_index < len(optionButtonList) and optionButtonList[row_index]:
+                optionButtonList[row_index].config(bg='#D3D3D3')  # Light gray when disabled
 
 def _show_option_config_modal(row_index):
     """Show modal dialog to configure option trading parameters"""
@@ -808,9 +827,11 @@ def _show_option_config_modal(row_index):
             contract_entry.focus()
     
     def cancel_option_config():
-        # Disable option if cancelled
+        # Disable option if cancelled and reset button appearance
         if row_index < len(optionEnabled):
             optionEnabled[row_index] = False
+        if row_index < len(optionButtonList) and optionButtonList[row_index]:
+            optionButtonList[row_index].config(bg='#D3D3D3')
         modal.destroy()
     
     Button(button_frame, text="OK", width=8, command=save_option_config).pack(side=LEFT, padx=5)
@@ -1122,13 +1143,13 @@ def addField(rowYPosition, initial_status_text=""):
     setDefaultbreakEvenEntryType(breakEvenEntry)
     breakEven.append(breakEvenEntry)
 
-    # 12) OPTION (column 11)
+    # 12) OPTION (column 11) - use Button (like Replay) so it is always visible in frozen exe
     row_index_for_option = len(symbol) - 1
-    optionVar = IntVar(field, 0)
-    optionCheckbox = Checkbutton(field, text="Option", variable=optionVar, 
-                                  command=lambda idx=row_index_for_option: _toggle_option_fields(idx))
-    optionCheckbox.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
+    optionButton = Button(field, width="10", height="1", text="Option", bg='#D3D3D3')
+    optionButton.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
     optionEnabled.append(False)  # Initialize option as disabled
+    optionButtonList.append(optionButton)
+    optionButton['command'] = lambda idx=row_index_for_option: _toggle_option_fields(idx)
     optionContract.append(StringVar(field, ""))  # Store contract (strike selection code)
     optionExpire.append(StringVar(field, ""))  # Store expiration selection
     optionEntryOrderType.append(StringVar(field, "Market"))  # Default entry order type

@@ -38,6 +38,70 @@ def _is_rth():
         return True  # Default to allow if session unknown
 
 
+def _get_nearest_strike_and_expiration(ib, stock_contract, desired_strike, desired_expiration_yyyymmdd):
+    """
+    Fetch option chain via reqSecDefOptParams and snap desired strike/expiration
+    to the nearest available. Returns (strike, expiration_yyyymmdd, trading_class) or (None, None, None) on failure.
+    """
+    try:
+        # For stocks use secType 'STK' and underlying conId; futFopExchange '' for stock options
+        chains = ib.reqSecDefOptParams(stock_contract.symbol, '', stock_contract.secType, stock_contract.conId)
+        if not chains:
+            logging.warning("No option chains returned for %s", stock_contract.symbol)
+            return None, None, None
+        # Prefer the chain that matches the underlying (tradingClass == symbol) to avoid Flex/2x chains.
+        # E.g. for SPY we want tradingClass 'SPY', not '2SPY' (Flex options reject IB-cleared orders).
+        symbol_upper = (stock_contract.symbol or '').upper()
+        chain = None
+        for c in chains:
+            tc = getattr(c, 'tradingClass', None) or ''
+            if (tc.upper() == symbol_upper and getattr(c, 'exchange', None) == 'SMART'):
+                chain = c
+                break
+        if chain is None:
+            for c in chains:
+                tc = getattr(c, 'tradingClass', None) or ''
+                if tc.upper() == symbol_upper:
+                    chain = c
+                    break
+        if chain is None:
+            for c in chains:
+                if getattr(c, 'exchange', None) == 'SMART':
+                    chain = c
+                    break
+        if chain is None:
+            chain = chains[0]
+        expirations = getattr(chain, 'expirations', None) or []
+        strikes = getattr(chain, 'strikes', None) or []
+        trading_class = getattr(chain, 'tradingClass', None)
+        if not strikes:
+            logging.warning("Option chain for %s has no strikes", stock_contract.symbol)
+            return None, None, None
+        # Snap strike to nearest available
+        strike_price = min(strikes, key=lambda s: abs(s - desired_strike))
+        # Snap expiration to nearest available (prefer exact match, else nearest date)
+        if not expirations:
+            logging.warning("Option chain for %s has no expirations", stock_contract.symbol)
+            return None, None, None
+        if desired_expiration_yyyymmdd in expirations:
+            expiration_date = desired_expiration_yyyymmdd
+        else:
+            # Find nearest expiration (by date string comparison)
+            def date_dist(exp_str):
+                try:
+                    return abs(int(exp_str) - int(desired_expiration_yyyymmdd))
+                except (ValueError, TypeError):
+                    return float('inf')
+            expiration_date = min(expirations, key=date_dist)
+        logging.info("Option chain snap: desired strike=%s -> %s, desired exp=%s -> %s (tradingClass=%s)",
+                     desired_strike, strike_price, desired_expiration_yyyymmdd, expiration_date, trading_class)
+        return strike_price, expiration_date, trading_class
+    except Exception as e:
+        logging.error("Error fetching option chain for %s: %s", stock_contract.symbol, e)
+        logging.error(traceback.format_exc())
+        return None, None, None
+
+
 def get_option_params_for_entry(symbol, timeFrame, barType, buySellType):
     """
     Return the latest matching option_trade_params for (symbol, timeFrame, barType, buySellType)
@@ -130,8 +194,20 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
         expiration_date = target_date.strftime("%Y%m%d")
         
-        # Create and qualify option contract
+        # Snap to nearest available strike and expiration from option chain (avoids "No security definition" errors)
+        snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
+            connection.ib, stock_contract, strike_price, expiration_date
+        )
+        if snapped_strike is None or snapped_expiration is None:
+            logging.error("Could not resolve option chain for %s; cannot place option order", symbol)
+            return
+        strike_price = snapped_strike
+        expiration_date = snapped_expiration
+        
+        # Create and qualify option contract (use tradingClass if chain provided it for correct routing)
         option_contract = Option(symbol, expiration_date, strike_price, option_right, 'SMART')
+        if trading_class:
+            option_contract.tradingClass = trading_class
         qualified = connection.ib.qualifyContracts(option_contract)
         if not qualified:
             logging.error("Could not qualify option contract for %s %s %s %s", symbol, expiration_date, strike_price, option_right)
