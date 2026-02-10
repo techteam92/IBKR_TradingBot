@@ -10,6 +10,12 @@ import traceback
 from ib_insync import Option, Order, Stock, PriceCondition
 import Config
 
+# Bid+ / Ask- adjustment settings
+BID_ASK_ADJUST_INTERVAL_SEC = 2.0   # If not filled after this many seconds, adjust price
+BID_ASK_ADJUST_INCREMENT = 0.05     # Bid+: increase by this; Ask-: decrease by this
+BID_ASK_MAX_ADJUSTMENTS = 20        # Safety limit on number of adjustments
+MIN_OPTION_LIMIT_PRICE = 0.01       # Ask- won't go below this
+
 
 # Placeholder functions - will be implemented
 def _resolve_option_from_dropdowns(connection, symbol, strike_code, expiry_code, right):
@@ -377,6 +383,12 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                             )
             logging.info("Option entry order placed and stored: orderId=%s, stock_entry_order_id=%s",
                         option_entry_order_id, stock_entry_order_id)
+            # Start Bid+/Ask- adjustment loop for immediate option entry (2s interval, ±$0.05, max 20)
+            if entry_order_type in ('Bid+', 'Ask-') and getattr(order, 'lmtPrice', 0) and order.lmtPrice > 0:
+                initial_limit = round(order.lmtPrice, 2)
+                asyncio.ensure_future(
+                    monitorAndAdjustBidAskOrder(connection, trade, entry_order_type, initial_limit, action)
+                )
             return
         
         # Not from_entry_fill: legacy conditional path (e.g. when option is placed before stock fills)
@@ -1247,71 +1259,61 @@ async def monitorAndAdjustBidAskOrder(connection, trade, order_type, initial_pri
             except Exception as e:
                 logging.warning("Could not check stock condition for order %s: %s. Proceeding with price adjustments.", order_id, e)
         
-        # Monitor order and adjust price
         current_price = initial_price
         adjustment_count = 0
-        max_adjustments = 20
-        check_interval = 2.0  # Check every 2 seconds
         
-        logging.info("Starting Bid+/Ask- adjustment monitoring for order %s: type=%s, initial_price=%.2f, action=%s", 
-                    order_id, order_type, initial_price, action)
+        logging.info("Starting Bid+/Ask- adjustment for order %s: type=%s, initial=%.2f, action=%s (interval=%.0fs, increment=%.2f, max=%d)", 
+                    order_id, order_type, initial_price, action, BID_ASK_ADJUST_INTERVAL_SEC, BID_ASK_ADJUST_INCREMENT, BID_ASK_MAX_ADJUSTMENTS)
         
-        while adjustment_count < max_adjustments:
-            await asyncio.sleep(check_interval)
+        while adjustment_count < BID_ASK_MAX_ADJUSTMENTS:
+            await asyncio.sleep(BID_ASK_ADJUST_INTERVAL_SEC)
             
-            # Check order status
             try:
-                # Get updated trade status
-                order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else None
+                order_status = getattr(getattr(trade, 'orderStatus', None), 'status', None)
+                if order_status is None and order_id in Config.orderStatusData:
+                    order_status = Config.orderStatusData[order_id].get('status')
                 
                 if order_status in ('Filled', 'Cancelled'):
                     logging.info("Option order %s status is %s. Stopping price adjustments.", order_id, order_status)
                     break
                 
-                # Check if order is still pending
-                if order_status in ('PreSubmitted', 'Submitted', 'PendingSubmit', 'PendingCancel'):
-                    # Order not filled yet, adjust price
-                    if order_type == 'Bid+':
-                        # Increase price by $0.05
-                        new_price = round(current_price + 0.05, 2)
-                        logging.info("Bid+ order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
-                                   order_id, current_price, new_price, adjustment_count + 1, max_adjustments)
-                    elif order_type == 'Ask-':
-                        # Decrease price by $0.05, but not below $0.01
-                        new_price = round(max(current_price - 0.05, 0.01), 2)
-                        if new_price < 0.01:
-                            logging.warning("Ask- order %s: Cannot adjust below $0.01. Current price: %.2f", order_id, current_price)
-                            break
-                        logging.info("Ask- order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
-                                   order_id, current_price, new_price, adjustment_count + 1, max_adjustments)
-                    else:
-                        logging.error("Unknown order type for adjustment: %s", order_type)
-                        break
-                    
-                    # Modify the order with new price
-                    try:
-                        trade.order.lmtPrice = new_price
-                        connection.ib.placeOrder(trade.contract, trade.order)
-                        current_price = new_price
-                        adjustment_count += 1
-                        logging.info("Option order %s price adjusted to %.2f", order_id, new_price)
-                    except Exception as e:
-                        logging.error("Error modifying order %s price: %s", order_id, e)
-                        break
-                else:
-                    # Order might be in a different state, check again
+                if order_status not in ('PreSubmitted', 'Submitted', 'PendingSubmit', 'PendingCancel'):
                     logging.debug("Option order %s status: %s", order_id, order_status)
+                    continue
+                
+                if order_type == 'Bid+':
+                    new_price = round(current_price + BID_ASK_ADJUST_INCREMENT, 2)
+                    logging.info("Bid+ order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
+                               order_id, current_price, new_price, adjustment_count + 1, BID_ASK_MAX_ADJUSTMENTS)
+                elif order_type == 'Ask-':
+                    new_price = round(max(current_price - BID_ASK_ADJUST_INCREMENT, MIN_OPTION_LIMIT_PRICE), 2)
+                    if new_price <= MIN_OPTION_LIMIT_PRICE and current_price <= MIN_OPTION_LIMIT_PRICE:
+                        logging.warning("Ask- order %s: Already at minimum %.2f. Stopping.", order_id, MIN_OPTION_LIMIT_PRICE)
+                        break
+                    logging.info("Ask- order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
+                               order_id, current_price, new_price, adjustment_count + 1, BID_ASK_MAX_ADJUSTMENTS)
+                else:
+                    logging.error("Unknown order type for adjustment: %s", order_type)
+                    break
+                
+                try:
+                    trade.order.lmtPrice = new_price
+                    connection.ib.placeOrder(trade.contract, trade.order)
+                    current_price = new_price
+                    adjustment_count += 1
+                    logging.info("Option order %s price adjusted to %.2f", order_id, new_price)
+                except Exception as e:
+                    logging.error("Error modifying order %s price: %s", order_id, e)
+                    break
                     
             except Exception as e:
                 logging.error("Error checking order status for %s: %s", order_id, e)
                 break
         
-        if adjustment_count >= max_adjustments:
-            logging.warning("Option order %s: Reached maximum adjustments (%d). Stopping price adjustments.", 
-                          order_id, max_adjustments)
+        if adjustment_count >= BID_ASK_MAX_ADJUSTMENTS:
+            logging.warning("Option order %s: Reached maximum adjustments (%d). Stopping.", order_id, BID_ASK_MAX_ADJUSTMENTS)
         else:
-            logging.info("Option order %s: Price adjustment monitoring completed (adjustments made: %d)", 
-                        order_id, adjustment_count)
+            logging.info("Option order %s: Bid+/Ask- monitoring done (adjustments made: %d)", order_id, adjustment_count)
             
     except Exception as e:
         logging.error("Error in monitorAndAdjustBidAskOrder: %s", e)

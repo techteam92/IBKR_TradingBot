@@ -691,19 +691,26 @@ def _show_option_config_modal(row_index):
     # Get parent window
     parent = scrollable_frame.winfo_toplevel()
     
-    # Create modal dialog
+    # Create modal dialog (wider so right column is not clipped)
     modal = tkinter.Toplevel(parent)
     modal.title("Option Trading Configuration")
-    modal.geometry("400x350")
-    modal.resizable(False, False)
+    modal_width = 520
+    modal_height = 380
+    modal.geometry(f"{modal_width}x{modal_height}")
+    modal.resizable(True, True)
+    modal.minsize(440, 360)
     modal.transient(parent)
     modal.grab_set()
     
+    # Ensure grid columns get space: label column and value column
+    modal.grid_columnconfigure(0, minsize=200)
+    modal.grid_columnconfigure(1, minsize=180)
+    
     # Center the dialog
     modal.update_idletasks()
-    x = (modal.winfo_screenwidth() // 2) - (400 // 2)
-    y = (modal.winfo_screenheight() // 2) - (350 // 2)
-    modal.geometry(f"400x350+{x}+{y}")
+    x = (modal.winfo_screenwidth() // 2) - (modal_width // 2)
+    y = (modal.winfo_screenheight() // 2) - (modal_height // 2)
+    modal.geometry(f"{modal_width}x{modal_height}+{x}+{y}")
     
     # Contract (Strike Price) - dropdown: ATM, OTM 1, OTM 2, OTM 3
     Label(modal, text="Strike (Contract):", font=(Config.fontName2, Config.fontSize2)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
@@ -781,9 +788,10 @@ def _show_option_config_modal(row_index):
         else:
             profit_order_combo.current(0)
     
-    # Info label
-    info_text = "Bid+: Start with bid, increase 5 cents until fill\nAsk-: Start with ask, decrease 5 cents until fill"
-    Label(modal, text=info_text, font=(Config.fontName2, 9), justify=LEFT).grid(row=6, column=0, columnspan=2, sticky="w", padx=10, pady=10)
+    # Info label (wraplength so text wraps and doesn't clip)
+    info_text = "Bid+: Start at bid, +$0.05 every 2s until fill (max 20). Ask-: Start at ask, -$0.05 every 2s until fill (max 20, floor $0.01)."
+    info_label = Label(modal, text=info_text, font=(Config.fontName2, 9), justify=LEFT, wraplength=modal_width - 40)
+    info_label.grid(row=6, column=0, columnspan=2, sticky="w", padx=10, pady=10)
     
     # Buttons frame
     button_frame = Frame(modal)
