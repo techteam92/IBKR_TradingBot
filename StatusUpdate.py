@@ -5,10 +5,11 @@ def StatusUpdate(response,ordType,contract,type,tradeType, quantity,histData,las
         # For Entry orders, try to get replay state from pending orders
         if ordType == 'Entry' and replayEnabled == False:
             # Try to find matching replay state from pending orders
-            # Use the most recent matching key
+            # Use the most recent matching key (symbol match is case-insensitive: UI may store 'spy', SendTrade passes 'SPY')
             matching_key = None
+            symbol_norm = (symbol or '').lower()
             for key in sorted(Config.order_replay_pending.keys(), key=lambda x: x[4], reverse=True):  # Sort by timestamp
-                if key[0] == symbol and key[1] == timeFrame and key[2] == barType and key[3] == userBuySell:
+                if (key[0] or '').lower() == symbol_norm and key[1] == timeFrame and key[2] == barType and key[3] == userBuySell:
                     matching_key = key
                     break
             if matching_key and matching_key in Config.order_replay_pending:
@@ -18,13 +19,19 @@ def StatusUpdate(response,ordType,contract,type,tradeType, quantity,histData,las
         
         logging.info("updating order status response = %s,ordType = %s,contract = %s,type = %s,tradeType = %s, quantity = %s,histData = %s,lastPrice = %s, symbol = %s,timeFrame = %s,profit = %s,stopLoss = %s,risk  = %s",response,ordType,contract,type,tradeType, quantity,histData,lastPrice, symbol,timeFrame,profit,stopLoss,risk)
         parent_id = getattr(response.order, 'parentId', 0) or 0
-        Config.orderStatusData.update({int(response.order.orderId):
-                                           {'slValue':slValue, 'ordType': ordType, 'orderId': int(response.order.orderId),
-                                            'contract': contract, 'type': type, 'action': tradeType, 'totalQuantity': quantity,
-                                            'status': response.orderStatus.status,"histData":histData, "usersymbol": symbol,
-                                            "lastPrice": lastPrice,
-                                            "timeFrame": timeFrame, "profit": profit, "stopLoss": stopLoss,"breakEven":breakEven,
-                                            "risk": risk,"dateTime":datetime.datetime.now(),"entryData":entryData,"tif":tif,"barType":barType,"userBuySell":userBuySell,"userAtr":userAtr,"outsideRth":outsideRth,"replayEnabled":replayEnabled,"entry_points":entry_points,"parentId":parent_id}})
+        order_dict = {'slValue':slValue, 'ordType': ordType, 'orderId': int(response.order.orderId),
+                     'contract': contract, 'type': type, 'action': tradeType, 'totalQuantity': quantity,
+                     'status': response.orderStatus.status,"histData":histData, "usersymbol": symbol,
+                     "lastPrice": lastPrice,
+                     "timeFrame": timeFrame, "profit": profit, "stopLoss": stopLoss,"breakEven":breakEven,
+                     "risk": risk,"dateTime":datetime.datetime.now(),"entryData":entryData,"tif":tif,"barType":barType,"userBuySell":userBuySell,"userAtr":userAtr,"outsideRth":outsideRth,"replayEnabled":replayEnabled,"entry_points":entry_points,"parentId":parent_id}
+        # For Entry orders with stop/trigger (STP, STP LMT): store auxPrice so TP base uses entry trigger, not lastPrice
+        if ordType == 'Entry' and hasattr(response.order, 'auxPrice') and getattr(response.order, 'auxPrice', None) not in (None, 0):
+            try:
+                order_dict['entry_aux_price'] = float(response.order.auxPrice)
+            except (TypeError, ValueError):
+                pass
+        Config.orderStatusData.update({int(response.order.orderId): order_dict})
     except Exception as e:
         logging.error("Error in updating order status dict "+str(e))
 

@@ -13,7 +13,7 @@ add002 = 0.02
 
 pullBackNo=3
 atrValue=50
-atrPeriod=20
+atrPeriod=14
 
 ibContract = "Stock"
 whatToShow="TRADES"

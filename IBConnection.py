@@ -372,6 +372,40 @@ class connection:
                 except Exception as e:
                     logging.error("Error in triggerOptionOrderOnStockFill: %s", e)
 
+                # RTH Replay: when stock SL or TP fills, call sendTpAndSl so replay re-entry can run
+                try:
+                    parent_data = data.get('entryData')
+                    if not parent_data and data.get('parentId'):
+                        parent_data = Config.orderStatusData.get(int(data['parentId']))
+                    # Fallback: RBB TP/SL use ocaGroup "tp" + entry_order_id (no parentId); resolve entry so re-entry can run
+                    if not parent_data:
+                        oca_group = getattr(trade.order, 'ocaGroup', None) if trade.order else None
+                        if oca_group and str(oca_group).startswith('tp'):
+                            try:
+                                entry_order_id = int(str(oca_group).replace('tp', ''))
+                                parent_data = Config.orderStatusData.get(entry_order_id)
+                                if parent_data:
+                                    logging.info("orderStatusEvent: Resolved parentData from ocaGroup %s (entry orderId=%s) for replay",
+                                                 oca_group, entry_order_id)
+                            except (ValueError, TypeError) as e:
+                                logging.warning("orderStatusEvent: Could not parse entry order ID from ocaGroup=%s: %s", oca_group, e)
+                    if parent_data:
+                        payload = {
+                            'status': 'Filled',
+                            'ordType': ord_type,
+                            'orderId': trade.order.orderId,
+                            'entryData': parent_data,
+                            'barType': data.get('barType'),
+                        }
+                        logging.info("orderStatusEvent: Stock %s filled (RTH), calling sendTpAndSl for replay (entry orderId=%s)",
+                                    ord_type, parent_data.get('orderId'))
+                        sendTpAndSl(self, payload)
+                    else:
+                        logging.warning("orderStatusEvent: Stock %s filled but no entryData/parentId for replay (orderId=%s)",
+                                       ord_type, trade.order.orderId)
+                except Exception as replay_err:
+                    logging.error("orderStatusEvent: Error calling sendTpAndSl for replay on stock %s fill: %s", ord_type, replay_err)
+
             # Option StopLoss/TakeProfit filled: cancel the other bracket order
             if trade.orderStatus.status == 'Filled' and ord_type in ('OptionStopLoss', 'OptionProfit'):
                 try:
@@ -387,6 +421,14 @@ class connection:
             # Only call sendTpAndSl when entry order is Filled (not for PendingCancel, Submitted, etc.)
             # This prevents duplicate TP/SL orders when entry order is being updated (cancelled/replaced)
             if should_send_tp_sl and trade.orderStatus.status == 'Filled' and ord_type == 'Entry':
+                # Use actual entry order auxPrice (trigger that fired) for TP base so RBB/RB/LB get correct TP
+                if hasattr(trade.order, 'auxPrice') and getattr(trade.order, 'auxPrice', None) not in (None, 0):
+                    try:
+                        data['entry_aux_price'] = float(trade.order.auxPrice)
+                        if trade.order.orderId in Config.orderStatusData:
+                            Config.orderStatusData[trade.order.orderId]['entry_aux_price'] = float(trade.order.auxPrice)
+                    except (TypeError, ValueError):
+                        pass
                 logging.info("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s",
                             trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
                 sendTpAndSl(self, data)
@@ -396,6 +438,18 @@ class connection:
             else:
                 logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
                             trade.order.orderId, bar_type, ord_type)
+
+            # RTH manual orders use bracket orders; sendTpAndSl is not called on entry fill. Place option entry only
+            # when stock Entry order fills (so option does not fill before the stock stop triggers).
+            if not should_send_tp_sl and trade.orderStatus.status == 'Filled' and ord_type == 'Entry':
+                try:
+                    data['filledPrice'] = getattr(trade.orderStatus, 'avgFillPrice', None) or Config.orderFilledPrice.get(trade.order.orderId)
+                    from OptionTrading import handleOptionTradingForEntryFill
+                    handleOptionTradingForEntryFill(self, trade.order.orderId, data)
+                except ImportError:
+                    pass
+                except Exception as e:
+                    logging.error("Error in handleOptionTradingForEntryFill on entry fill: %s", e)
 
     # tws connection establish
     def connect(self):
