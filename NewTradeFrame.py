@@ -734,17 +734,19 @@ def _show_option_config_modal(row_index):
     else:
         contract_combo.set("ATM")
     
-    # Expiration Date - dropdown: 0,1,2,4,8 weeks out
-    Label(modal, text="Expiration (weeks):", font=(Config.fontName2, Config.fontSize2)).grid(row=1, column=0, sticky="w", padx=10, pady=5)
-    expiry_options = ["0", "1", "2", "4", "8"]
-    expire_combo = ttk.Combobox(modal, state="readonly", width=12, values=expiry_options)
+    # Expiration: 0 = current Friday, 1 = next Friday, 2 = next next, 3 = next next next
+    Label(modal, text="Expiration:", font=(Config.fontName2, Config.fontSize2)).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+    expiry_options_display = ["0 = Current Friday", "1 = Next Friday", "2 = Next Next Friday", "3 = Next Next Next Friday"]
+    expiry_options_values = ["0", "1", "2", "3"]
+    expire_combo = ttk.Combobox(modal, state="readonly", width=24, values=expiry_options_display)
     expire_combo.grid(row=1, column=1, padx=10, pady=5)
     if row_index < len(optionExpire):
         current_exp = optionExpire[row_index].get() or "0"
-        if current_exp in expiry_options:
-            expire_combo.set(current_exp)
+        if current_exp in expiry_options_values:
+            idx = expiry_options_values.index(current_exp)
+            expire_combo.set(expiry_options_display[idx])
         else:
-            expire_combo.set("0")
+            expire_combo.set(expiry_options_display[0])
 
     # Risk amount ($) for options
     Label(modal, text="Risk Amount ($):", font=(Config.fontName2, Config.fontSize2)).grid(row=2, column=0, sticky="w", padx=10, pady=5)
@@ -752,8 +754,6 @@ def _show_option_config_modal(row_index):
     risk_entry.grid(row=2, column=1, padx=10, pady=5)
     if row_index < len(optionRiskAmount):
         risk_entry.insert(0, optionRiskAmount[row_index].get())
-    else:
-        expire_combo.set("0")
     
     # Entry Order Type
     Label(modal, text="Entry Order Type:", font=(Config.fontName2, Config.fontSize2)).grid(row=3, column=0, sticky="w", padx=10, pady=5)
@@ -811,10 +811,15 @@ def _show_option_config_modal(row_index):
             if row_index < len(optionContract):
                 optionContract[row_index].set(internal_strike)
             
-            # Save expiration selection (weeks out)
-            expire_val = expire_combo.get().strip()
+            # Save expiration: 0=current Friday, 1=next, 2=next next, 3=next next next
+            expire_display = expire_combo.get().strip()
+            expire_val = "0"
+            if expire_display and "=" in expire_display:
+                expire_val = expire_display.split("=")[0].strip()
+            if expire_val not in ("0", "1", "2", "3"):
+                expire_val = "0"
             if row_index < len(optionExpire):
-                optionExpire[row_index].set(expire_val or "0")
+                optionExpire[row_index].set(expire_val)
 
             # Save risk amount (optional)
             risk_val = risk_entry.get().strip()

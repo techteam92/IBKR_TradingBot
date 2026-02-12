@@ -6347,10 +6347,10 @@ def sendTpAndSl(connection, entryData):
             if not parentData:
                 logging.error("sendTpAndSl: parentData is empty or None, cannot trigger PBe2")
             
-            # RTH Replay: one cycle only. When TP or SL fills, re-enter once with same logic; re-entered trade has replay off (no further re-entry).
+            # Replay: one cycle only when Stop Loss fills (not when Take Profit fills). Re-enter once; re-entered trade has replay off.
             replay_enabled = parentData.get('replayEnabled', False) if parentData else False
-            if (entryData['ordType'] in ("StopLoss", "TakeProfit")) and replay_enabled:
-                logging.info("Replay (one cycle): %s triggered, re-entering trade once for %s", entryData['ordType'], parentData.get('usersymbol'))
+            if entryData['ordType'] == "StopLoss" and replay_enabled:
+                logging.info("Replay (one cycle): StopLoss triggered, re-entering trade once for %s", parentData.get('usersymbol'))
                 # Re-enter the same trade with same parameters. Do NOT set replay for this order so it does not cycle again.
                 try:
                     # Get current session for outsideRth
