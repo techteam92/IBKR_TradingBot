@@ -429,9 +429,18 @@ class connection:
                             Config.orderStatusData[trade.order.orderId]['entry_aux_price'] = float(trade.order.auxPrice)
                     except (TypeError, ValueError):
                         pass
+                data['filledPrice'] = getattr(trade.orderStatus, 'avgFillPrice', None) or Config.orderFilledPrice.get(trade.order.orderId)
+                Config.orderStatusData[trade.order.orderId] = data
                 logging.info("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s",
                             trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
                 sendTpAndSl(self, data)
+                # Option entry at same time as stock fill (not tied to TP/SL). sendTpAndSl may have
+                # added option_params to data; option module computes SL/TP from entry_data histData if needed.
+                try:
+                    from OptionTrading import on_stock_entry_fill
+                    on_stock_entry_fill(self, trade.order.orderId)
+                except Exception as opt_e:
+                    logging.debug("orderStatusEvent: Option on_stock_entry_fill: %s", opt_e)
             elif should_send_tp_sl:
                 logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s (status != 'Filled' or ordType != 'Entry')",
                             trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
@@ -439,17 +448,25 @@ class connection:
                 logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
                             trade.order.orderId, bar_type, ord_type)
 
-            # RTH manual orders use bracket orders; sendTpAndSl is not called on entry fill. Place option entry only
-            # when stock Entry order fills (so option does not fill before the stock stop triggers).
-            if not should_send_tp_sl and trade.orderStatus.status == 'Filled' and ord_type == 'Entry':
+            # Option entry at same time as stock fill: when Entry Filled but sendTpAndSl was not called
+            # (e.g. manual/Custom in RTH use bracket orders, so we skip sendTpAndSl but must still trigger option).
+            if trade.orderStatus.status == 'Filled' and ord_type == 'Entry' and not should_send_tp_sl:
+                # Ensure data has filledPrice and is stored so option module can run
+                if hasattr(trade.order, 'auxPrice') and getattr(trade.order, 'auxPrice', None) not in (None, 0):
+                    try:
+                        data['entry_aux_price'] = float(trade.order.auxPrice)
+                        if trade.order.orderId in Config.orderStatusData:
+                            Config.orderStatusData[trade.order.orderId]['entry_aux_price'] = float(trade.order.auxPrice)
+                    except (TypeError, ValueError):
+                        pass
+                data['filledPrice'] = getattr(trade.orderStatus, 'avgFillPrice', None) or Config.orderFilledPrice.get(trade.order.orderId)
+                Config.orderStatusData[trade.order.orderId] = data
+                logging.info("orderStatusEvent: Entry filled (no sendTpAndSl), triggering option on_stock_entry_fill for orderId=%s", trade.order.orderId)
                 try:
-                    data['filledPrice'] = getattr(trade.orderStatus, 'avgFillPrice', None) or Config.orderFilledPrice.get(trade.order.orderId)
-                    from OptionTrading import handleOptionTradingForEntryFill
-                    handleOptionTradingForEntryFill(self, trade.order.orderId, data)
-                except ImportError:
-                    pass
-                except Exception as e:
-                    logging.error("Error in handleOptionTradingForEntryFill on entry fill: %s", e)
+                    from OptionTrading import on_stock_entry_fill
+                    on_stock_entry_fill(self, trade.order.orderId)
+                except Exception as opt_e:
+                    logging.warning("orderStatusEvent: Option on_stock_entry_fill failed for orderId=%s: %s", trade.order.orderId, opt_e)
 
     # tws connection establish
     def connect(self):
@@ -638,49 +655,59 @@ class connection:
             self._order_id_counter += 1
             logging.debug("get_next_order_id: using local fallback counter -> %s", oid)
             return oid
+    def _schedule_reqPnl_retry(self, retry_count, max_retries, delay=1.0):
+        """Schedule a reqPnl retry on the IB event loop (avoids 'no event loop in thread' when called from Timer)."""
+        loop = getattr(self.ib, "loop", None)
+        if loop is not None:
+            def run_later():
+                self.reqPnl(retry_count=retry_count, max_retries=max_retries)
+            loop.call_later(delay, run_later)
+        else:
+            threading.Timer(delay, lambda: self.reqPnl(retry_count, max_retries)).start()
+
     def reqPnl(self, retry_count=0, max_retries=10):
         """
         Request PnL tracking. Will retry if connection/account not ready yet.
+        Must be called from the thread that runs the IB event loop (e.g. main thread).
         """
         try:
             # Check if connected first
             if not self.ib.isConnected():
                 if retry_count < max_retries:
                     logging.info(f"reqPnl: Not connected yet, retrying in 1 second... (attempt {retry_count + 1}/{max_retries})")
-                    import threading
-                    threading.Timer(1.0, lambda: self.reqPnl(retry_count + 1, max_retries)).start()
+                    self._schedule_reqPnl_retry(retry_count + 1, max_retries)
                     return
                 else:
                     logging.warning("reqPnl: Connection not established after max retries. PnL tracking disabled.")
                     print("Warning: Could not connect to TWS. PnL tracking disabled.")
                     return
-            
+
             print("req pnl initializing...")
             accountValues = self.getAccountValue()
-            
+
             if accountValues and len(accountValues) > 0:
                 account = accountValues[0].account
                 self.ib.reqPnL(account=account)
-                asyncio.ensure_future(self.pnlData())
+                loop = getattr(self.ib, "loop", None)
+                if loop is not None:
+                    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.pnlData()))
+                else:
+                    asyncio.ensure_future(self.pnlData())
                 print(f"PnL request successful for account: {account}")
                 logging.info(f"PnL tracking enabled for account: {account}")
             else:
-                # Retry if account values not available yet
                 if retry_count < max_retries:
                     logging.info(f"reqPnl: Account values not available yet, retrying in 1 second... (attempt {retry_count + 1}/{max_retries})")
-                    import threading
-                    threading.Timer(1.0, lambda: self.reqPnl(retry_count + 1, max_retries)).start()
+                    self._schedule_reqPnl_retry(retry_count + 1, max_retries)
                     return
                 else:
                     logging.warning("Could not get account values after max retries. PnL tracking disabled.")
                     print("Warning: No account info available. PnL tracking disabled.")
                     print("This is normal if TWS is not connected yet or account info is not available.")
         except Exception as e:
-            # Retry on exception if we haven't exceeded max retries
             if retry_count < max_retries:
                 logging.warning(f"reqPnl: Error on attempt {retry_count + 1}: {e}, retrying in 1 second...")
-                import threading
-                threading.Timer(1.0, lambda: self.reqPnl(retry_count + 1, max_retries)).start()
+                self._schedule_reqPnl_retry(retry_count + 1, max_retries)
                 return
             else:
                 logging.error(f"Error requesting PnL after {max_retries} attempts: {e}")

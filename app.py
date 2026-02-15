@@ -34,14 +34,18 @@ class TkApp:
         logging.info(f'front gui start.  {app_version} {tradingTime}')
         self.connection = connection()
         self.connection.connect()
-        # Wait a moment for connection to establish, then request PnL
-        # reqPnl() now has retry logic, so it will wait for account info if needed
-        import threading
-        threading.Timer(0.5, lambda: self.connection.reqPnl()).start()
+        # Wait a moment for connection to establish, then request PnL.
+        # Run reqPnl on the main thread's event loop (ib_insync requires it); the timer runs in a worker thread.
+        self.loop = asyncio.get_event_loop()
+        def schedule_reqPnl():
+            try:
+                self.loop.call_soon_threadsafe(self.connection.reqPnl)
+            except Exception as e:
+                logging.warning("Could not schedule reqPnl: %s", e)
+        threading.Timer(0.5, schedule_reqPnl).start()
         self.frame = Tk()
         self.dialog()
         self.frontLayout()
-        self.loop = asyncio.get_event_loop()
         tk_app_instance = self  # Set global reference for API endpoints
 
     # this will run our tkinter and Ib  event will not override.

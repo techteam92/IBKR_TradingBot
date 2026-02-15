@@ -108,6 +108,51 @@ def _get_nearest_strike_and_expiration(ib, stock_contract, desired_strike, desir
         return None, None, None
 
 
+def _pre_resolve_option_contract(connection, symbol, entry_price, option_contract_str, option_expire, buy_sell_type):
+    """
+    Resolve option contract once using entry_price (e.g. stop trigger 684.77) so option is ATM at that level.
+    Returns (qualified_option_contract, option_right) or (None, None). Used by price-level monitor to avoid
+    refetching stock price and option chain when trigger fires (reduces delay).
+    """
+    try:
+        stock_contract = Stock(symbol, 'SMART', 'USD')
+        stock_contract = connection.ib.qualifyContracts(stock_contract)[0]
+        option_right = 'C' if (buy_sell_type or 'BUY').upper() == 'BUY' else 'P'
+        strike_price = None
+        if option_contract_str == "ATM":
+            strike_price = round(entry_price, 0)
+        elif option_contract_str and str(option_contract_str).strip().startswith("OTM"):
+            otm_steps = int(str(option_contract_str).replace("OTM", "").strip() or "1")
+            if (buy_sell_type or 'BUY').upper() == 'BUY':
+                strike_price = round(entry_price + (otm_steps * 1.0), 0)
+            else:
+                strike_price = round(entry_price - (otm_steps * 1.0), 0)
+        else:
+            return None, None
+        expiry_weeks = int(option_expire) if option_expire else 0
+        today = datetime.date.today()
+        days_until_friday = (4 - today.weekday()) % 7
+        target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
+        expiration_date = target_date.strftime("%Y%m%d")
+        snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
+            connection.ib, stock_contract, strike_price, expiration_date
+        )
+        if snapped_strike is None or snapped_expiration is None:
+            return None, None
+        option_contract = Option(symbol, snapped_expiration, snapped_strike, option_right, 'SMART')
+        if trading_class:
+            option_contract.tradingClass = trading_class
+        qualified = connection.ib.qualifyContracts(option_contract)
+        if not qualified:
+            return None, None
+        logging.info("Pre-resolved option for price-level trigger: %s %s %s @ entry=%.2f",
+                     symbol, option_right, snapped_strike, entry_price)
+        return qualified[0], option_right
+    except Exception as e:
+        logging.warning("_pre_resolve_option_contract failed: %s", e)
+        return None, None
+
+
 def get_option_params_for_entry(symbol, timeFrame, barType, buySellType):
     """
     Return the latest matching option_trade_params for (symbol, timeFrame, barType, buySellType)
@@ -130,107 +175,109 @@ def get_option_params_for_entry(symbol, timeFrame, barType, buySellType):
 
 
 async def placeOptionTradeAndStore(connection, symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, 
-                          entry_order_type, sl_order_type, tp_order_type, quantity, tif, buy_sell_type, risk_amount=None, stock_entry_order_id=None, outside_rth=False, from_entry_fill=False):
+                          entry_order_type, sl_order_type, tp_order_type, quantity, tif, buy_sell_type, risk_amount=None, stock_entry_order_id=None, outside_rth=False, from_entry_fill=False, pre_resolved_contract=None, pre_resolved_option_right=None):
     """
     Place option trade and store order IDs.
     Option logic runs only during RTH (Regular Trading Hours).
     When from_entry_fill=True (stock entry just filled):
     - BUY stock -> option buys call immediately. When stock TP or SL fills -> option sells call.
     - SELL stock -> option buys put immediately. When stock TP or SL fills -> option sells put.
-    This function:
-    1. Resolves option contract (call for BUY stock, put for SELL stock; ATM/OTM, weeks out)
-    2. Calculates quantity from risk amount
-    3. If from_entry_fill: places option entry immediately (no price condition)
-    4. Stores SL/TP parameters so when stock TP or SL fills we place option sell
+    When pre_resolved_contract is set (from price-level trigger): skip stock price fetch and option chain
+    resolution to minimize delay; option is already resolved at entry_price level.
     """
     try:
         if outside_rth or not _is_rth():
             logging.info("Option trading only runs during RTH; skipping (outside_rth=%s)", outside_rth)
             return
-        logging.info("placeOptionTradeAndStore: Starting for %s, contract=%s, expire=%s, entry=%s, sl=%s, tp=%s, risk=%s", 
-                    symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, risk_amount)
+        logging.info("placeOptionTradeAndStore: Starting for %s, contract=%s, expire=%s, entry=%s, sl=%s, tp=%s, risk=%s%s", 
+                    symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, risk_amount,
+                    " (pre-resolved)" if pre_resolved_contract else "")
         
-        # Get stock contract
+        # Get stock contract (needed for stock_exchange and possibly for non-pre-resolved path)
         stock_contract = Stock(symbol, 'SMART', 'USD')
         stock_contract = connection.ib.qualifyContracts(stock_contract)[0]
         stock_exchange = stock_contract.exchange or 'SMART'
         
-        # Get current stock price to determine strike
-        stock_ticker = connection.ib.reqMktData(stock_contract, '', False, False)
-        connection.ib.sleep(0.5)
-        current_stock_price = None
-        if stock_ticker:
-            last = getattr(stock_ticker, "last", None)
-            close = getattr(stock_ticker, "close", None)
-            if last and last > 0:
-                current_stock_price = last
-            elif close and close > 0:
-                current_stock_price = close
-        connection.ib.cancelMktData(stock_contract)
-        
-        if not current_stock_price:
-            logging.error("Could not get current stock price for %s", symbol)
-            return
-        
-        # Resolve strike from dropdown (ATM/OTM)
-        strike_price = None
-        if option_contract_str == "ATM":
-            strike_price = round(current_stock_price, 0)  # Round to nearest dollar
-        elif option_contract_str.startswith("OTM"):
-            # OTM 1, OTM 2, OTM 3
-            otm_steps = int(option_contract_str.replace("OTM", "").strip())
-            if buy_sell_type == "BUY":
-                # For BUY: OTM = above current price (call)
-                strike_price = round(current_stock_price + (otm_steps * 1.0), 0)
-            else:
-                # For SELL: OTM = below current price (put)
-                strike_price = round(current_stock_price - (otm_steps * 1.0), 0)
+        if pre_resolved_contract and pre_resolved_option_right:
+            option_contract = pre_resolved_contract
+            option_right = pre_resolved_option_right
         else:
-            logging.error("Unknown option contract code: %s", option_contract_str)
-            return
-        
-        # Determine option right (Call for BUY, Put for SELL)
-        option_right = 'C' if buy_sell_type == 'BUY' else 'P'
-        
-        # Resolve expiration date from weeks out
-        expiry_weeks = int(option_expire) if option_expire else 0
-        today = datetime.date.today()
-        # Find this week's Friday (weekly options expire on Friday). 0 = current week = this Friday.
-        days_until_friday = (4 - today.weekday()) % 7
-        target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
-        expiration_date = target_date.strftime("%Y%m%d")
-        
-        # Snap to nearest available strike and expiration from option chain (avoids "No security definition" errors)
-        snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
-            connection.ib, stock_contract, strike_price, expiration_date
-        )
-        if snapped_strike is None or snapped_expiration is None:
-            logging.error("Could not resolve option chain for %s; cannot place option order", symbol)
-            return
-        strike_price = snapped_strike
-        expiration_date = snapped_expiration
-        
-        # Create and qualify option contract (use tradingClass if chain provided it for correct routing)
-        option_contract = Option(symbol, expiration_date, strike_price, option_right, 'SMART')
-        if trading_class:
-            option_contract.tradingClass = trading_class
-        qualified = connection.ib.qualifyContracts(option_contract)
-        if not qualified:
-            logging.error("Could not qualify option contract for %s %s %s %s", symbol, expiration_date, strike_price, option_right)
-            return
-        option_contract = qualified[0]
+            # Get current stock price to determine strike
+            stock_ticker = connection.ib.reqMktData(stock_contract, '', False, False)
+            await asyncio.sleep(0.5)
+            current_stock_price = None
+            if stock_ticker:
+                last = getattr(stock_ticker, "last", None)
+                close = getattr(stock_ticker, "close", None)
+                if last and last > 0:
+                    current_stock_price = last
+                elif close and close > 0:
+                    current_stock_price = close
+            connection.ib.cancelMktData(stock_contract)
+            
+            if not current_stock_price:
+                logging.error("Could not get current stock price for %s", symbol)
+                return
+            
+            # Resolve strike from dropdown (ATM/OTM)
+            strike_price = None
+            if option_contract_str == "ATM":
+                strike_price = round(current_stock_price, 0)  # Round to nearest dollar
+            elif option_contract_str.startswith("OTM"):
+                # OTM 1, OTM 2, OTM 3
+                otm_steps = int(option_contract_str.replace("OTM", "").strip())
+                if buy_sell_type == "BUY":
+                    # For BUY: OTM = above current price (call)
+                    strike_price = round(current_stock_price + (otm_steps * 1.0), 0)
+                else:
+                    # For SELL: OTM = below current price (put)
+                    strike_price = round(current_stock_price - (otm_steps * 1.0), 0)
+            else:
+                logging.error("Unknown option contract code: %s", option_contract_str)
+                return
+            
+            # Determine option right (Call for BUY, Put for SELL)
+            option_right = 'C' if buy_sell_type == 'BUY' else 'P'
+            
+            # Resolve expiration date from weeks out
+            expiry_weeks = int(option_expire) if option_expire else 0
+            today = datetime.date.today()
+            # Find this week's Friday (weekly options expire on Friday). 0 = current week = this Friday.
+            days_until_friday = (4 - today.weekday()) % 7
+            target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
+            expiration_date = target_date.strftime("%Y%m%d")
+            
+            # Snap to nearest available strike and expiration from option chain (avoids "No security definition" errors)
+            snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
+                connection.ib, stock_contract, strike_price, expiration_date
+            )
+            if snapped_strike is None or snapped_expiration is None:
+                logging.error("Could not resolve option chain for %s; cannot place option order", symbol)
+                return
+            strike_price = snapped_strike
+            expiration_date = snapped_expiration
+            
+            # Create and qualify option contract (use tradingClass if chain provided it for correct routing)
+            option_contract = Option(symbol, expiration_date, strike_price, option_right, 'SMART')
+            if trading_class:
+                option_contract.tradingClass = trading_class
+            qualified = connection.ib.qualifyContracts(option_contract)
+            if not qualified:
+                logging.error("Could not qualify option contract for %s %s %s %s", symbol, expiration_date, strike_price, option_right)
+                return
+            option_contract = qualified[0]
         
         # Get option prices for quantity calculation and order placement.
-        # Option market data often arrives slower than stock; wait up to 5s for valid data.
+        # When pre-resolved (price-level trigger), use shorter wait to place order faster.
         option_ticker = connection.ib.reqMktData(option_contract, '', False, False)
         opt_price = None
         opt_bid = None
         opt_ask = None
-        max_wait_sec = 5.0
-        check_interval_sec = 0.4
+        max_wait_sec = 2.0 if pre_resolved_contract else 5.0
+        check_interval_sec = 0.15 if pre_resolved_contract else 0.4
         waited = 0.0
         while waited < max_wait_sec:
-            connection.ib.sleep(check_interval_sec)
+            await asyncio.sleep(check_interval_sec)
             waited += check_interval_sec
             opt_bid = getattr(option_ticker, "bid", None)
             opt_ask = getattr(option_ticker, "ask", None)
@@ -317,7 +364,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                 logging.error("Failed to place option entry order (immediate)")
                 return
             option_entry_order_id = trade.order.orderId
-            logging.info("Option entry placed immediately (stock entry filled): %s %d %s, orderId=%s",
+            logging.info("Option entry placed immediately (by price level): %s %d %s, orderId=%s",
                         action, option_quantity, "call" if option_right == 'C' else "put", option_entry_order_id)
             # Store order data and SL/TP params (option exit when stock TP or SL fills)
             if option_entry_order_id not in Config.orderStatusData:
@@ -614,27 +661,37 @@ async def placeOptionEntryOrderImmediately(connection, stock_entry_order_id, sym
         logging.error("Error in placeOptionEntryOrderImmediately: %s", e)
         logging.error(traceback.format_exc())
 
-def handleOptionTrading(connection, entryData):
+def on_stock_entry_fill(connection, stock_entry_order_id):
     """
-    Handle option trading after stock entry fills.
-    Delegates to handleOptionTradingForEntryFill with stock entry order ID and entry data.
+    Single hook from stock when a stock entry order fills.
+    Option logic is separate: we receive only order_id and read all numbers from Config
+    (stock writes filledPrice, stop_loss_price, profit_price, etc. to Config.orderStatusData).
     """
     try:
-        stock_entry_order_id = entryData.get('orderId') if isinstance(entryData, dict) else None
-        if stock_entry_order_id:
-            handleOptionTradingForEntryFill(connection, stock_entry_order_id, entryData)
-        else:
-            logging.warning("handleOptionTrading: No orderId in entryData, cannot place option orders")
+        entry_data = Config.orderStatusData.get(int(stock_entry_order_id), {})
+        if not entry_data:
+            logging.debug("on_stock_entry_fill: No orderStatusData for orderId=%s", stock_entry_order_id)
+            return
+        handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data)
     except Exception as e:
-        logging.error("Error in handleOptionTrading: %s", e)
+        logging.error("Error in on_stock_entry_fill: %s", e)
         logging.error(traceback.format_exc())
+
 
 def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data):
     """
-    Handle option trading when stock entry order fills.
-    This is called for Custom/Limit Order trades that use bracket orders.
+    Option logic (separate from stock). Option entry is triggered ONLY by price level
+    (when underlying reaches entry), not by stock order fill. Triggering on fill causes
+    2–5s delay and is disabled. Skip placing option here; the price-level monitor handles it.
     """
     try:
+        # Option entry is always by price level only; never trigger on stock fill (too slow).
+        logging.debug("handleOptionTradingForEntryFill: Option entry is by price level only, skipping fill-based trigger for orderId=%s", stock_entry_order_id)
+        return
+        # Avoid double placement: if option was already triggered (e.g. parallel path), skip
+        if Config.orderStatusData.get(int(stock_entry_order_id), {}).get('option_entry_triggered'):
+            logging.debug("handleOptionTradingForEntryFill: Option already triggered for orderId=%s, skipping", stock_entry_order_id)
+            return
         symbol = entry_data.get('usersymbol') if isinstance(entry_data, dict) else None
         timeFrame = entry_data.get('timeFrame') if isinstance(entry_data, dict) else None
         barType = entry_data.get('barType') if isinstance(entry_data, dict) else None
@@ -691,10 +748,45 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
             if not profit_price:
                 profit_price = entry_order_data.get('tp_price') or entry_order_data.get('profit_price')
         
+        # If stock has not written SL/TP yet, compute same numbers here (option only borrows formulas).
+        # Use entry_data['histData'] first (same bar data as stock) so we can place option at fill time.
+        if (not stop_loss_price or not profit_price) and entry_price and entry_data.get('contract'):
+            try:
+                from FunctionCalls import getRecentChartTime
+                from SendTrade import get_sl_for_selling, get_tp_for_selling, get_sl_for_buying, get_tp_for_buying
+                contract = entry_data.get('contract')
+                time_frame = entry_data.get('timeFrame', '1 min')
+                chart_time = getRecentChartTime(time_frame)
+                hist_data = entry_data.get('histData') or connection.getHistoricalChartData(contract, time_frame, chart_time)
+                if hist_data and isinstance(hist_data, dict) and hist_data.get('high') is not None:
+                    entry_stop_price = entry_data.get('entry_aux_price') or entry_data.get('lastPrice') or entry_price
+                    stop_loss_type = entry_data.get('stopLoss')
+                    sl_value = entry_data.get('slValue', 0)
+                    profit_type = entry_data.get('profit')
+                    is_buy_entry = (buySellType or entry_data.get('action', 'BUY')) == 'BUY'
+                    if is_buy_entry:
+                        if not stop_loss_price:
+                            stop_loss_price = get_sl_for_selling(connection, stop_loss_type, entry_stop_price, hist_data, sl_value, contract, time_frame, chart_time)
+                        if not profit_price and stop_loss_price:
+                            profit_price = get_tp_for_selling(connection, time_frame, contract, profit_type, entry_stop_price, hist_data, stop_loss_type)
+                    else:
+                        if not stop_loss_price:
+                            stop_loss_price = get_sl_for_buying(connection, stop_loss_type, entry_stop_price, hist_data, sl_value, contract, time_frame, chart_time)
+                        if not profit_price and stop_loss_price:
+                            profit_price = get_tp_for_buying(connection, time_frame, contract, profit_type, entry_stop_price, hist_data, stop_loss_type)
+                    if stop_loss_price is not None and profit_price is not None:
+                        logging.info("handleOptionTradingForEntryFill: Computed SL=%.2f, TP=%.2f (parallel path, entry=%.2f)", stop_loss_price, profit_price, entry_price)
+            except Exception as comp_e:
+                logging.debug("handleOptionTradingForEntryFill: Could not compute SL/TP (will rely on sendTpAndSl): %s", comp_e)
+        
         logging.info("handleOptionTradingForEntryFill: Using entry_price=%.2f (from option_entry_price=%s, filledPrice=%s, lastPrice=%s)", 
                     entry_price, entry_data.get('option_entry_price'), entry_data.get('filledPrice'), entry_data.get('lastPrice'))
         
         if entry_price and stop_loss_price and profit_price:
+            # Avoid double placement
+            if int(stock_entry_order_id) not in Config.orderStatusData:
+                Config.orderStatusData[int(stock_entry_order_id)] = {}
+            Config.orderStatusData[int(stock_entry_order_id)]['option_entry_triggered'] = True
             # Place option orders asynchronously (from_entry_fill=True so we place immediately, not deferred to monitoring)
             asyncio.ensure_future(
                 placeOptionTradeAndStore(
@@ -724,6 +816,214 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
     except Exception as e:
         logging.error("Error in handleOptionTradingForEntryFill: %s", e)
         logging.error(traceback.format_exc())
+
+
+async def _wait_next_tick(ticker, timeout_sec=0.4):
+    """Wait for next market data update on ticker (streaming). Returns when updateEvent fires or timeout."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    def on_update(_):
+        if not fut.done():
+            try:
+                fut.set_result(None)
+            except Exception:
+                pass
+    try:
+        ticker.updateEvent += on_update
+        await asyncio.wait_for(fut, timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        try:
+            ticker.updateEvent -= on_update
+        except Exception:
+            pass
+
+
+async def monitorUnderlyingAndPlaceOptionOrders(connection, stock_entry_order_id, symbol, entry_price, stop_loss_price,
+                                                tp_price, buy_sell_type, option_params, quantity, tif, pre_resolved_contract=None, pre_resolved_option_right=None):
+    """
+    Monitor underlying price and place option entry when price reaches entry level,
+    then place option SL or TP when price reaches those levels. Uses streaming market
+    data (ticker.updateEvent) to react on every tick and minimize delay.     If
+    pre_resolved_contract is provided, option is placed without refetching stock/chain.
+    """
+    stock_ticker = None
+    stock_contract = None
+    try:
+        if not _is_rth():
+            return
+        stock_contract = Stock(symbol, 'SMART', 'USD')
+        stock_contract = connection.ib.qualifyContracts(stock_contract)[0]
+        entry_placed = False
+        option_entry_order_id = None
+        exit_placed = False
+        # BUY: entry when last >= entry_price; SL when last <= stop_loss_price; TP when last >= tp_price
+        # SELL: entry when last <= entry_price; SL when last >= stop_loss_price; TP when last <= tp_price
+        is_buy = (buy_sell_type or 'BUY').upper() == 'BUY'
+        no_data_count = 0
+        iter_count = 0
+        try:
+            stock_ticker = connection.ib.reqMktData(stock_contract, '', False, False)
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            logging.debug("monitorUnderlyingAndPlaceOptionOrders: reqMktData: %s", e)
+        while True:
+            # Wait for next tick (streaming) or short timeout so we can check order status
+            if stock_ticker:
+                await _wait_next_tick(stock_ticker, timeout_sec=0.35)
+            else:
+                await asyncio.sleep(0.4)
+            iter_count += 1
+            # Stop if stock entry order no longer exists or is cancelled
+            entry_data = Config.orderStatusData.get(stock_entry_order_id)
+            if not entry_data:
+                logging.info("monitorUnderlyingAndPlaceOptionOrders: No orderStatusData for stock entry %s, stopping", stock_entry_order_id)
+                break
+            if entry_data.get('status') in ('Cancelled', 'Inactive'):
+                logging.info("monitorUnderlyingAndPlaceOptionOrders: Stock entry %s is %s, stopping", stock_entry_order_id, entry_data.get('status'))
+                break
+            last = None
+            if stock_ticker:
+                last = getattr(stock_ticker, 'last', None) or getattr(stock_ticker, 'close', None)
+            if last is None or last <= 0:
+                no_data_count += 1
+                if no_data_count <= 3 or (no_data_count % 20) == 0:
+                    logging.info("monitorUnderlyingAndPlaceOptionOrders: %s no price yet (last=%s) waiting for market data", symbol, last)
+                continue
+            no_data_count = 0
+            if iter_count <= 3 or (iter_count % 20) == 0:
+                logging.info("monitorUnderlyingAndPlaceOptionOrders: %s last=%.2f entry=%.2f (BUY: need last>=entry; SELL: need last<=entry)", symbol, last, entry_price)
+            if not entry_placed:
+                entry_hit = (is_buy and last >= entry_price) or (not is_buy and last <= entry_price)
+                if entry_hit:
+                    logging.info("Option by price: %s reached entry level (price=%.2f, entry=%.2f), placing option entry",
+                                 symbol, last, entry_price)
+                    if stock_ticker:
+                        connection.ib.cancelMktData(stock_contract)
+                        stock_ticker = None
+                    if stock_entry_order_id not in Config.orderStatusData:
+                        Config.orderStatusData[stock_entry_order_id] = {}
+                    Config.orderStatusData[stock_entry_order_id]['option_entry_triggered'] = True
+                    await placeOptionTradeAndStore(
+                        connection,
+                        symbol,
+                        option_params.get('contract'),
+                        option_params.get('expire'),
+                        entry_price,
+                        stop_loss_price,
+                        tp_price,
+                        option_params.get('entry_order_type', 'Market'),
+                        option_params.get('sl_order_type', 'Market'),
+                        option_params.get('tp_order_type', 'Market'),
+                        quantity,
+                        tif,
+                        buy_sell_type,
+                        option_params.get('risk_amount'),
+                        stock_entry_order_id=stock_entry_order_id,
+                        from_entry_fill=True,
+                        pre_resolved_contract=pre_resolved_contract,
+                        pre_resolved_option_right=pre_resolved_option_right,
+                    )
+                    entry_placed = True
+                    option_entry_order_id = (Config.orderStatusData.get(stock_entry_order_id) or {}).get('option_orders', {}).get('entry')
+                    if not option_entry_order_id:
+                        logging.warning("monitorUnderlyingAndPlaceOptionOrders: Option entry placed but order id not found")
+                    else:
+                        logging.info("Option by price: Option entry placed orderId=%s; will monitor for SL/TP levels", option_entry_order_id)
+                    await asyncio.sleep(1.5)
+                    if not stock_ticker:
+                        stock_ticker = connection.ib.reqMktData(stock_contract, '', False, False)
+                        await asyncio.sleep(0.15)
+                continue
+            if not option_entry_order_id or exit_placed:
+                if exit_placed:
+                    logging.info("monitorUnderlyingAndPlaceOptionOrders: Option exit placed for %s, stopping", symbol)
+                    break
+                option_entry_order_id = (Config.orderStatusData.get(stock_entry_order_id) or {}).get('option_orders', {}).get('entry')
+                continue
+            option_data = Config.orderStatusData.get(option_entry_order_id)
+            if not option_data:
+                continue
+            sl_params = option_data.get('option_sl_params')
+            tp_params = option_data.get('option_tp_params')
+            if not sl_params or not tp_params:
+                continue
+            sl_hit = (is_buy and last <= stop_loss_price) or (not is_buy and last >= stop_loss_price)
+            tp_hit = (is_buy and last >= tp_price) or (not is_buy and last <= tp_price)
+            if sl_hit:
+                logging.info("Option by price: %s reached SL level (price=%.2f, sl=%.2f), placing option stop loss", symbol, last, stop_loss_price)
+                await placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
+                exit_placed = True
+            elif tp_hit:
+                logging.info("Option by price: %s reached TP level (price=%.2f, tp=%.2f), placing option take profit", symbol, last, tp_price)
+                await placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
+                exit_placed = True
+    except Exception as e:
+        logging.error("Error in monitorUnderlyingAndPlaceOptionOrders: %s", e)
+        logging.error(traceback.format_exc())
+    finally:
+        if stock_ticker and stock_contract:
+            try:
+                connection.ib.cancelMktData(stock_contract)
+            except Exception:
+                pass
+
+
+def startOptionTradingByPriceLevel(connection, stock_entry_order_id, symbol, timeFrame, barType, buySellType,
+                                   entry_price, stop_loss_price, tp_price, quantity, tif):
+    """
+    Start option trading triggered by underlying price levels (entry, SL, TP) instead of stock order fills.
+    Used for Custom entry with bracket orders in RTH: option entry when price reaches entry,
+    option SL/TP when price reaches those levels, so option and stock can trigger simultaneously.
+    """
+    try:
+        if not _is_rth():
+            logging.info("startOptionTradingByPriceLevel: RTH only, skipping")
+            return
+        option_params = None
+        latest_ts = None
+        if hasattr(Config, 'option_trade_params') and Config.option_trade_params:
+            for trade_key, params in list(Config.option_trade_params.items()):
+                if not isinstance(trade_key, (tuple, list)) or len(trade_key) < 5:
+                    continue
+                key_symbol, key_tf, key_bar, key_side, ts = trade_key[0], trade_key[1], trade_key[2], trade_key[3], trade_key[4]
+                if (key_symbol == symbol and key_tf == timeFrame and key_bar == barType and key_side == buySellType
+                        and params.get('enabled')):
+                    if latest_ts is None or ts > latest_ts:
+                        latest_ts = ts
+                        option_params = params
+        if not option_params or not option_params.get('enabled'):
+            logging.info("startOptionTradingByPriceLevel: No option params for %s %s %s %s (option by price level skipped)", symbol, timeFrame, barType, buySellType)
+            return
+        if stock_entry_order_id not in Config.orderStatusData:
+            Config.orderStatusData[stock_entry_order_id] = {}
+        Config.orderStatusData[stock_entry_order_id]['option_trigger_by_price_level'] = True
+        logging.info("Option by price level: Starting monitor for %s entry=%.2f sl=%.2f tp=%.2f (option will trigger at these levels)",
+                     symbol, entry_price, stop_loss_price, tp_price)
+        pre_resolved_contract, pre_resolved_option_right = _pre_resolve_option_contract(
+            connection, symbol, entry_price,
+            option_params.get('contract'), option_params.get('expire'), buySellType
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(connection.ib, 'loop', None) or asyncio.get_event_loop()
+        loop.create_task(
+            monitorUnderlyingAndPlaceOptionOrders(
+                connection, stock_entry_order_id, symbol, entry_price, stop_loss_price, tp_price,
+                buySellType, option_params, quantity, tif,
+                pre_resolved_contract=pre_resolved_contract,
+                pre_resolved_option_right=pre_resolved_option_right,
+            )
+        )
+    except Exception as e:
+        logging.error("Error in startOptionTradingByPriceLevel: %s", e)
+        logging.error(traceback.format_exc())
+
 
 def handleOptionEntryFill(connection, option_entry_order_id):
     """
@@ -904,7 +1204,7 @@ async def monitorOptionEntryBeforeStockFill(connection, stock_entry_order_id, sy
                                 stock_entry_order_id)
                     break
                 
-                # If stock entry is filled, stop monitoring (option order will be placed by handleOptionTradingForEntryFill)
+                # If stock entry is filled, stop monitoring (option entry is by price level only)
                 if entry_data.get('status') == 'Filled':
                     logging.info("monitorOptionEntryBeforeStockFill: Stock entry order %s is FILLED, stopping monitoring", 
                                 stock_entry_order_id)
@@ -918,7 +1218,7 @@ async def monitorOptionEntryBeforeStockFill(connection, stock_entry_order_id, sy
                 
                 # Get current stock price
                 stock_ticker = connection.ib.reqMktData(stock_contract, '', False, False)
-                connection.ib.sleep(0.1)  # Small delay for market data
+                await asyncio.sleep(0.1)  # Small delay for market data
                 current_stock_price = None
                 if stock_ticker:
                     last = getattr(stock_ticker, "last", None)

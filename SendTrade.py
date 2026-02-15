@@ -169,29 +169,6 @@ def _parse_entry_price(entry_points):
     return round(price, Config.roundVal)
 
 
-def _trigger_option_entry_after_stock_entry(connection, entry_order_id, symbol, timeFrame, barType, buySellType,
-                                            entry_price, stop_loss_price, profit_price, outsideRth):
-    """
-    If option trading is enabled for this trade, place option entry order immediately
-    (same time as stock entry). Option entry uses same entry/sl/tp prices; quantity = risk / (option_price * 100).
-    """
-    try:
-        from OptionTrading import get_option_params_for_entry, placeOptionEntryOrderImmediately
-        option_params = get_option_params_for_entry(symbol, timeFrame, barType, buySellType)
-        if not option_params or not option_params.get('enabled'):
-            return
-        entry_data = Config.orderStatusData.get(int(entry_order_id))
-        if not entry_data:
-            return
-        asyncio.ensure_future(placeOptionEntryOrderImmediately(
-            connection, int(entry_order_id), symbol, entry_price, stop_loss_price, profit_price,
-            option_params, buySellType, entry_data, outsideRth
-        ))
-        logging.info("Option entry order scheduled for stock entry order %s (%s)", entry_order_id, symbol)
-    except Exception as e:
-        logging.warning("Could not trigger option entry after stock entry: %s", e)
-
-
 def _calculate_manual_stop_loss(connection, contract, entry_price, stop_loss_type, buy_sell_type, time_frame, sl_value):
     """
     Calculate stop loss price for manual orders (Limit Order and Stop Order).
@@ -1266,9 +1243,6 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                                  timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue, breakEven,
                                  outsideRth, False, entry_points)
                     
-                    # Trigger option entry order concurrently with stock entry (same as manual_limit_order / manual_stop_order)
-                    _trigger_option_entry_after_stock_entry(connection, actual_entry_order_id, symbol, timeFrame, barType, buySellType,
-                                                            aux_price, stop_loss_price, tp_price, outsideRth)
                     
                     # Place TP order with retry logic if order ID is in done state
                     try:
@@ -1562,7 +1536,6 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                     logging.info(f"Stored stop_size={stop_size}, stop_loss_price={stop_loss_price} in orderStatusData for LOD/HOD order {entry_response.order.orderId}")
                 tp_offset_lod = stop_size * multiplier_map.get(profit, 1)
                 tp_price_lod = round(entry_stop_price + tp_offset_lod, Config.roundVal) if buySellType == 'BUY' else round(entry_stop_price - tp_offset_lod, Config.roundVal)
-                _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_stop_price, stop_loss_price, tp_price_lod, outsideRth)
                 logging.info("LOD/HOD: Entry STP order placed. TP and SL will be sent automatically after entry fills.")
             except Exception as place_error:
                 logging.error("Error placing LOD/HOD STP order for %s: %s", symbol, place_error)
@@ -1604,7 +1577,6 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                 if stopLoss == Config.stopLoss[1] and int(entry_response.order.orderId) in Config.orderStatusData:  # Only for Custom stop loss
                     Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
                     logging.info(f"Stored stop_size={stop_size} in orderStatusData for Custom stop loss Limit Order {entry_response.order.orderId}")
-                _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
                 logging.info("Extended hours: Entry LMT order placed. TP and SL will be sent automatically after entry fills.")
             except Exception as place_error:
                 logging.error("Error placing limit order for %s: %s", symbol, place_error)
@@ -1665,7 +1637,6 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
             StatusUpdate(entry_response, 'Entry', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
-            _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
             tp_response = connection.placeTrade(contract=contract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
             StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
@@ -2290,7 +2261,6 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 if is_extended and entry_limit_price is not None:
                     Config.orderStatusData[int(entry_response.order.orderId)]['entryLimitPrice'] = entry_limit_price
                 logging.info(f"Stored stop_size={stop_size} in orderStatusData for order {entry_response.order.orderId}")
-            _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
             logging.info("Extended hours: Entry %s order placed. TP (LMT) and SL (STP LMT) will be sent automatically after entry fills.", order_type)
         else:
             # Regular market hours: Send bracket orders (Entry STP, TP LMT, SL STP)
@@ -2364,15 +2334,22 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth, False, entry_points)
             # Option entry: only trigger at placement for extended hours (OTH). In RTH the stock entry is a pending STP
-            # and must fill first; option is placed when stock Entry fills (see orderStatusEvent -> handleOptionTradingForEntryFill).
-            if outsideRth:
-                _trigger_option_entry_after_stock_entry(connection, entry_response.order.orderId, symbol, timeFrame, barType, buySellType, entry_price, stop_loss_price, tp_price, outsideRth)
+            # and must fill first.
             tp_response = connection.placeTrade(contract=contract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
             logging.info("RTH Stop Order: TP order placed - orderId=%s, status=%s, parentId=%s", 
                          tp_response.order.orderId, tp_response.orderStatus.status, tp_response.order.parentId)
             StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
+            
+            # Store TP/SL prices on entry BEFORE placing SL (SL has transmit=True). So when bracket is
+            # transmitted and entry fills immediately, option module already has tp/stop_loss_price.
+            entry_order_id = int(entry_response.order.orderId)
+            if entry_order_id in Config.orderStatusData:
+                Config.orderStatusData[entry_order_id]['tp_price'] = tp_price
+                Config.orderStatusData[entry_order_id]['stop_loss_price'] = stop_loss_price
+                logging.info("RTH Stop Order: Stored TP/SL prices in entry orderStatusData (before SL transmit): entry=%s, tp=%s, sl=%s", 
+                            entry_order_id, tp_price, stop_loss_price)
             
             sl_response = connection.placeTrade(contract=contract, order=sl_order, outsideRth=outsideRth, trade_type='StopLoss')
             logging.info("RTH Stop Order: SL order placed - orderId=%s, status=%s, parentId=%s, transmit=%s (should transmit entire bracket)", 
@@ -2381,15 +2358,18 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                          timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
             
-            # Store TP/SL prices in entry order's orderStatusData for option trading
-            entry_order_id = int(entry_response.order.orderId)
+            # Store TP/SL order IDs so option/other logic can reference them
             if entry_order_id in Config.orderStatusData:
-                Config.orderStatusData[entry_order_id]['tp_price'] = tp_price
-                Config.orderStatusData[entry_order_id]['stop_loss_price'] = stop_loss_price
                 Config.orderStatusData[entry_order_id]['tp_order_id'] = int(tp_response.order.orderId)
                 Config.orderStatusData[entry_order_id]['sl_order_id'] = int(sl_response.order.orderId)
-                logging.info("RTH Stop Order: Stored TP/SL prices in entry orderStatusData: entry=%s, tp=%s, sl=%s", 
-                            entry_order_id, tp_price, stop_loss_price)
+            
+            # Option by price level: trigger option entry/SL/TP when underlying reaches entry/SL/TP (same as stock)
+            try:
+                from OptionTrading import startOptionTradingByPriceLevel
+                startOptionTradingByPriceLevel(connection, entry_order_id, symbol, timeFrame, barType, buySellType,
+                                              entry_price, stop_loss_price, tp_price, qty, tif)
+            except Exception as opt_e:
+                logging.warning("startOptionTradingByPriceLevel failed (option by price level not started): %s", opt_e)
             
             logging.info("Regular market: Bracket orders placed for %s: trigger=%s, tp=%s, sl=%s, quantity=%s", 
                          symbol, entry_price, tp_price, stop_loss_price, qty)
@@ -2840,17 +2820,6 @@ async def rbb_loop_run(connection,key,entry_order):
                         old_order = d  # Update old_order for next iteration
                         logging.info("RBBB: Updated orderStatusData with new bar data (datetime=%s) for continuous entry order updates", histData.get('dateTime'))
                         
-                        # Update option orders if option trading is enabled for this RBB trade
-                        try:
-                            from OptionTrading import updateOptionOrdersForRBB
-                            # Calculate new stop loss price for option update
-                            new_sl_price = None
-                            if 'stop_loss_price' in d:
-                                new_sl_price = d['stop_loss_price']
-                            # Update option entry order to match new stock entry price
-                            updateOptionOrdersForRBB(connection, order.orderId, round(aux_price, Config.roundVal), new_sl_price)
-                        except Exception as e:
-                            logging.error("RBBB: Error updating option orders: %s", e)
             else:
                 break
 
@@ -6277,6 +6246,7 @@ def sendTpAndSl(connection, entryData):
                         if task.exception():
                             logging.error("TP/SL async task failed with exception: %s", task.exception())
                             logging.error("Traceback: %s", traceback.format_exc())
+                            return
                     except Exception as e:
                         logging.error("Error in task_done_callback: %s", e)
                 
@@ -7573,6 +7543,14 @@ async def sendTpSlBuy(connection, entryData):
             logging.info("sendTpSlBuy: Checking condition - stpPrice is not None: %s, stpPrice > 0: %s", 
                         stpPrice is not None, stpPrice > 0 if stpPrice is not None else False)
             
+            # Store prices so option module can read them (option logic is separate; only borrows numbers)
+            if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
+                entryData['stop_loss_price'] = stpPrice
+            if 'price' in locals() and price and price > 0:
+                entryData['profit_price'] = price
+            if 'filled_price' in locals():
+                entryData['filledPrice'] = filled_price
+            
             # Check if protection order already filled (for RBB in extended hours)
             if entryData.get('protection_order_filled', False):
                 logging.warning("sendTpSlBuy: Protection order already filled, skipping stop loss order placement. barType=%s, orderId=%s", 
@@ -7607,22 +7585,6 @@ async def sendTpSlBuy(connection, entryData):
                             stpPrice, entryData.get('barType'), entryData.get('orderId'))
             
             # MOC order removed per user request
-            
-            # Handle option trading if enabled (using external module)
-            try:
-                from OptionTrading import handleOptionTrading
-                # Store calculated prices in entryData for option trading
-                if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
-                    entryData['stop_loss_price'] = stpPrice
-                if 'price' in locals() and price and price > 0:
-                    entryData['profit_price'] = price
-                if 'filled_price' in locals():
-                    entryData['filledPrice'] = filled_price
-                handleOptionTrading(connection, entryData)
-            except ImportError:
-                logging.warning("OptionTrading module not found, skipping option trading")
-            except Exception as e:
-                logging.error("Error in option trading: %s", e)
             
             break
     except Exception as e:
@@ -8923,7 +8885,7 @@ async def sendTpSlSell(connection, entryData):
                         "Extended TP calculation (sell/LONG) %s stop_size=%s multiplier=%s entry_stop_price=%s filled_price=%s price=%s",
                         entryData['contract'], stop_size, multiplier, entry_stop_price, filled_price, price,
                     )
-                    # Store TP price for option trading (handleOptionTradingForEntryFill) before price = None
+                    # Store TP price (option module reads from here; separate logic)
                     entryData['tp_price'] = price
                     entryData['profit_price'] = price
                     eid = entryData.get('orderId')
@@ -9239,7 +9201,7 @@ async def sendTpSlSell(connection, entryData):
                         bar_low = float(histData.get('low', 0))
                         stpPrice = round(bar_low - 0.01, Config.roundVal)
                         logging.info(f"RBB EntryBar stop loss (for LONG): bar_low={bar_low}, stpPrice={stpPrice} (bar_low - 0.01), stop_size={stop_size}, barType={entryData.get('barType')}")
-                        # Store SL price for option trading (handleOptionTradingForEntryFill)
+                        # Store SL price (option module reads from here; separate logic)
                         entryData['stop_loss_price'] = stpPrice
                         entryData['stopLossPrice'] = stpPrice
                         eid = entryData.get('orderId')
@@ -9487,6 +9449,26 @@ async def sendTpSlSell(connection, entryData):
                 logging.warning("sendTpSlSell: Protection order already filled, skipping stop loss order placement. barType=%s, orderId=%s", 
                             entryData.get('barType'), entryData.get('orderId'))
             else:
+                # Store prices so option module can read them (option logic is separate; only borrows numbers)
+                if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
+                    entryData['stop_loss_price'] = stpPrice
+                if 'price' in locals() and price and price > 0:
+                    entryData['profit_price'] = price
+                elif entryData.get('tp_price') is not None:
+                    entryData['profit_price'] = entryData['tp_price']
+                if 'filled_price' in locals():
+                    entryData['filledPrice'] = filled_price
+                eid = entryData.get('orderId')
+                if eid is not None:
+                    if eid not in Config.orderStatusData:
+                        Config.orderStatusData[eid] = {}
+                    if entryData.get('tp_price') is not None:
+                        Config.orderStatusData[eid]['tp_price'] = entryData['tp_price']
+                        Config.orderStatusData[eid]['profit_price'] = entryData['tp_price']
+                    if entryData.get('stop_loss_price') is not None:
+                        Config.orderStatusData[eid]['stop_loss_price'] = entryData['stop_loss_price']
+                        Config.orderStatusData[eid]['stopLossPrice'] = entryData['stop_loss_price']
+                
                 # Determine stop loss action based on entry action
                 # sendTpSlSell is called for BUY entries (LONG position), so stop loss is SELL (to close LONG)
                 # sendTpSlBuy is called for SELL entries (SHORT position), so stop loss is BUY (to close SHORT)
@@ -9510,36 +9492,6 @@ async def sendTpSlSell(connection, entryData):
                     logging.error("sendTpSlSell: Traceback: %s", traceback.format_exc())
                 traceback.print_exc()
             # MOC order removed per user request
-            
-            # Handle option trading if enabled (using external module)
-            try:
-                from OptionTrading import handleOptionTrading
-                # Store calculated prices in entryData for option trading (RBB sets price=None after sendTakeProfit, so use tp_price)
-                if 'stpPrice' in locals() and stpPrice and stpPrice > 0:
-                    entryData['stop_loss_price'] = stpPrice
-                if 'price' in locals() and price and price > 0:
-                    entryData['profit_price'] = price
-                elif entryData.get('tp_price') is not None:
-                    entryData['profit_price'] = entryData['tp_price']
-                if 'filled_price' in locals():
-                    entryData['filledPrice'] = filled_price
-                eid = entryData.get('orderId')
-                if eid is not None and entryData.get('option_params'):
-                    if entryData.get('tp_price') is not None:
-                        if eid not in Config.orderStatusData:
-                            Config.orderStatusData[eid] = {}
-                        Config.orderStatusData[eid]['tp_price'] = entryData['tp_price']
-                        Config.orderStatusData[eid]['profit_price'] = entryData['tp_price']
-                    if entryData.get('stop_loss_price') is not None:
-                        if eid not in Config.orderStatusData:
-                            Config.orderStatusData[eid] = {}
-                        Config.orderStatusData[eid]['stop_loss_price'] = entryData['stop_loss_price']
-                        Config.orderStatusData[eid]['stopLossPrice'] = entryData['stop_loss_price']
-                handleOptionTrading(connection, entryData)
-            except ImportError:
-                logging.warning("OptionTrading module not found, skipping option trading")
-            except Exception as e:
-                logging.error("Error in option trading: %s", e)
             
             break
     except Exception as e:
