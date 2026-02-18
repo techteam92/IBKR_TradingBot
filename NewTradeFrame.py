@@ -432,7 +432,7 @@ def getScrollableframe(frame):
     canvas.bind("<Configure>", _resize_canvas)
 
 def NewTradeFrame(frame,connection):
-    logging.info("New Trade Frame Init")
+    logging.debug("New Trade Frame Init")
     getScrollableframe(frame)
 
     global IbConn
@@ -463,7 +463,7 @@ def _log_ui_elements_displayed():
         "Symbol", "Stop Loss", "Trade Type", "Buy/Sell", "Execute", "Risk", "Profit",
         "Time Frame", "Time In Force", "Replay", "Break Even", "Option", "Status"
     ]
-    logging.info("UI: All elements displayed: %s", ", ".join(elements))
+    logging.debug("UI: All elements displayed: %s", ", ".join(elements))
 
 
 def _get_current_session():
@@ -511,7 +511,7 @@ def _log_snapshot_for_row(row_index):
         contract = getContract(current_symbol, None)
         hist_bar = _get_latest_hist_bar(IbConn, contract, current_timeframe)
         if hist_bar:
-            logging.info(
+            logging.debug(
                 "Execute snapshot -> symbol=%s timeframe=%s high=%s low=%s",
                 current_symbol,
                 current_timeframe,
@@ -543,7 +543,7 @@ def execute_row(row_index):
 
     session = _get_current_session()
     outsideRth = session in ('PREMARKET', 'AFTERHOURS', 'OVERNIGHT')
-    logging.info("Execute row %s detected session: %s, outsideRth: %s", row_index, session, outsideRth)
+    logging.debug("Execute row %s detected session: %s, outsideRth: %s", row_index, session, outsideRth)
 
     current_tif = timeInForce[row_index].get()
     if outsideRth and current_tif != 'OTH':
@@ -930,7 +930,7 @@ def addOldCache():
 
 
 def addField(rowYPosition, initial_status_text=""):
-    logging.info("New Row Adding..")
+    logging.debug("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
     # Configure 13 columns for the new order (added Option column) and 2 rows (labels + fields)

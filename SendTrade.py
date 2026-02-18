@@ -15,7 +15,7 @@ import numpy as np
 import nest_asyncio
 def getContract(symbol,currency):
     try:
-        logging.info("creating contract for %s symbole is %s and currency is %s",Config.ibContract,symbol,currency)
+        logging.debug("creating contract for %s symbole is %s and currency is %s",Config.ibContract,symbol,currency)
         if (Config.ibContract == "Forex"):
             if currency == None:
                 return Forex(symbol)
@@ -446,7 +446,7 @@ def _get_latest_hist_bar(connection, contract, timeFrame):
     latest_bar = _extract_latest_bar(hist_dataset)
 
     if not latest_bar:
-        logging.info(
+        logging.debug(
             "Primary historical source empty for %s %s, falling back to raw chart data",
             contract,
             timeFrame,
@@ -2342,10 +2342,11 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                          timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
             
-            # Store TP/SL prices on entry BEFORE placing SL (SL has transmit=True). So when bracket is
-            # transmitted and entry fills immediately, option module already has tp/stop_loss_price.
+            # Store entry trigger and TP/SL prices on entry BEFORE placing SL (SL has transmit=True).
+            # Option monitor reads these so option and stock use the same levels (single source of truth).
             entry_order_id = int(entry_response.order.orderId)
             if entry_order_id in Config.orderStatusData:
+                Config.orderStatusData[entry_order_id]['entry_price'] = entry_price
                 Config.orderStatusData[entry_order_id]['tp_price'] = tp_price
                 Config.orderStatusData[entry_order_id]['stop_loss_price'] = stop_loss_price
                 logging.info("RTH Stop Order: Stored TP/SL prices in entry orderStatusData (before SL transmit): entry=%s, tp=%s, sl=%s", 
@@ -5003,11 +5004,11 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         symbol=symbol.upper()
         if entry_points == "":
             entry_points = 0
-        logging.info("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s option_enabled=%s option_contract=%s option_expire=%s option_risk_amount=%s",  
+        logging.debug("sending trade %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s option_enabled=%s option_contract=%s option_expire=%s option_risk_amount=%s",  
                     symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue , breakEven , outsideRth,entry_points,
                     option_enabled, option_contract, option_expire, option_risk_amount)
-        logging.info("SendTrade: barType='%s', Config.entryTradeType=%s", barType, Config.entryTradeType)
-        logging.info("SendTrade: Checking routing - barType='%s', entryTradeType[6]='%s'", barType, Config.entryTradeType[6] if len(Config.entryTradeType) > 6 else "N/A")
+        logging.debug("SendTrade: barType='%s', Config.entryTradeType=%s", barType, Config.entryTradeType)
+        logging.debug("SendTrade: Checking routing - barType='%s', entryTradeType[6]='%s'", barType, Config.entryTradeType[6] if len(Config.entryTradeType) > 6 else "N/A")
 
         # Validate Time In Force: if outside trading hours, must be OTH
         session = _get_current_session()
@@ -5024,7 +5025,7 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             tif = 'DAY'
 
         # Enforce client trading-session rules
-        logging.info("Current session detected: %s, outsideRth flag: %s", session, outsideRth)
+        logging.debug("Current session detected: %s, outsideRth flag: %s", session, outsideRth)
         print(f"Current trading session: {session} (outsideRth={outsideRth})")
         
         if outsideRth:
@@ -5050,7 +5051,7 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         # The option parameters are stored and will be used in StatusUpdate when entry fills
         # Note: option_expire can be 0 (current week), so check for not None/empty string instead of truthiness
         if option_enabled and option_contract and (option_expire is not None and option_expire != ""):
-            logging.info("Option trading enabled for %s: contract=%s, expire=%s, entry_order_type=%s, sl_order_type=%s, tp_order_type=%s, risk_amount=%s", 
+            logging.debug("Option trading enabled for %s: contract=%s, expire=%s, entry_order_type=%s, sl_order_type=%s, tp_order_type=%s, risk_amount=%s", 
                         symbol, option_contract, option_expire, option_entry_order_type, option_sl_order_type, option_tp_order_type, option_risk_amount)
             # Store option parameters in Config for later use when entry fills
             trade_key = (symbol, timeFrame, barType, buySellType, datetime.datetime.now().timestamp())
@@ -5064,15 +5065,15 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
                 'tp_order_type': option_tp_order_type,
                 'risk_amount': option_risk_amount,
             }
-            logging.info("Option trading parameters stored for trade key: %s", trade_key)
+            logging.debug("Option trading parameters stored for trade key: %s", trade_key)
 
         if barType == 'Limit Order':
-            logging.info("Routing to manual_limit_order for barType='%s'", barType)
+            logging.debug("Routing to manual_limit_order for barType='%s'", barType)
             await manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                      atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
             return
         elif barType == 'Custom':
-            logging.info("Routing to manual_stop_order for barType='%s'", barType)
+            logging.debug("Routing to manual_stop_order for barType='%s'", barType)
             await manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                     atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
             return
@@ -5080,33 +5081,33 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         # Check all trade types
         logging.info("Checking trade type routing: barType='%s'", barType)
         if barType == Config.entryTradeType[3]:  # FB
-            logging.info("Routing to first_bar_fb for barType='%s' (Config.entryTradeType[3]='%s')", barType, Config.entryTradeType[3])
+            logging.debug("Routing to first_bar_fb for barType='%s' (Config.entryTradeType[3]='%s')", barType, Config.entryTradeType[3])
             await (first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[2]:  # Conditional Order
-            logging.info("Routing to conditional_order for barType='%s'", barType)
+            logging.debug("Routing to conditional_order for barType='%s'", barType)
             await (conditional_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
         elif barType == Config.entryTradeType[4] or barType == Config.entryTradeType[5]:  # RB or RBB (indices shifted after adding Conditional Order)
-            logging.info("Routing to rb_and_rbb for barType='%s'", barType)
+            logging.debug("Routing to rb_and_rbb for barType='%s'", barType)
             await (rb_and_rbb(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[6]:  # PBe1
-            logging.info("Routing to pull_back_PBe1 for barType='%s' (Config.entryTradeType[6]='%s')", barType, Config.entryTradeType[6])
+            logging.debug("Routing to pull_back_PBe1 for barType='%s' (Config.entryTradeType[6]='%s')", barType, Config.entryTradeType[6])
             await (pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[7]:  # PBe2
-            logging.info("Routing to pull_back_PBe2 for barType='%s' (Config.entryTradeType[7]='%s')", barType, Config.entryTradeType[7])
+            logging.debug("Routing to pull_back_PBe2 for barType='%s' (Config.entryTradeType[7]='%s')", barType, Config.entryTradeType[7])
             await (pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth))
         elif barType == Config.entryTradeType[8]:  # LB
-            logging.info("Routing to lb1 for barType='%s' (Config.entryTradeType[8]='%s')", barType, Config.entryTradeType[8])
+            logging.debug("Routing to lb1 for barType='%s' (Config.entryTradeType[8]='%s')", barType, Config.entryTradeType[8])
             await (lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
         elif barType == Config.entryTradeType[9]:  # LB2
-            logging.info("Routing to lb2 for barType='%s' (Config.entryTradeType[9]='%s')", barType, Config.entryTradeType[9])
+            logging.debug("Routing to lb2 for barType='%s' (Config.entryTradeType[9]='%s')", barType, Config.entryTradeType[9])
             await (lb2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
         elif barType == Config.entryTradeType[10]:  # LB3
-            logging.info("Routing to lb3 for barType='%s' (Config.entryTradeType[10]='%s')", barType, Config.entryTradeType[10])
+            logging.debug("Routing to lb3 for barType='%s' (Config.entryTradeType[10]='%s')", barType, Config.entryTradeType[10])
             await (lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
 
-        logging.info("task done for %s symbol",symbol)
+        logging.debug("task done for %s symbol",symbol)
 
     except Exception as e:
         logging.error("error in sending mkt trade %s", e)
@@ -6174,9 +6175,8 @@ def TpSlForFB(connection,ibcontract,tradeType,quantity,histData,lastPrice, symbo
 
 def sendTpAndSl(connection, entryData):
     try:
-        logging.info("sendTpAndSl called: status=%s, ordType=%s, barType=%s, orderId=%s, outsideRth=%s",
-                    entryData.get('status'), entryData.get('ordType'), entryData.get('barType'), 
-                    entryData.get('orderId'), entryData.get('outsideRth'))
+        logging.debug("sendTpAndSl called: status=%s, ordType=%s, barType=%s, orderId=%s",
+                      entryData.get('status'), entryData.get('ordType'), entryData.get('barType'), entryData.get('orderId'))
         
         if (entryData['status'] == "Filled" and entryData['ordType'] == "Entry"):
             # Check if TP/SL have already been sent for this order to prevent duplicates
@@ -6190,7 +6190,7 @@ def sendTpAndSl(connection, entryData):
                 # Mark TP/SL as sent to prevent duplicates
                 order_data['tp_sl_sent'] = True
                 Config.orderStatusData[order_id] = order_data
-                logging.info(f"sendTpAndSl: Marked TP/SL as sent for orderId={order_id}, barType=%s", entryData.get('barType'))
+                logging.debug("sendTpAndSl: Marked TP/SL as sent for orderId=%s, barType=%s", order_id, entryData.get('barType'))
             bar_type = entryData.get('barType', '')
             is_manual_order = bar_type in Config.manualOrderTypes
             is_extended_hours = entryData.get('outsideRth', False)
@@ -6222,19 +6222,19 @@ def sendTpAndSl(connection, entryData):
                     
                     if not protection_filled:
                         try:
-                            logging.info(f"sendTpAndSl: Cancelling protection order {protection_order_id} before sending TP/SL orders")
+                            logging.debug("sendTpAndSl: Cancelling protection order %s before sending TP/SL orders", protection_order_id)
                             # Get the protection order from orderStatusData or create Order object directly
                             from ib_insync import Order
                             protection_order = Order(orderId=protection_order_id)
                             connection.cancelTrade(protection_order)
-                            logging.info(f"sendTpAndSl: Protection order {protection_order_id} cancelled successfully")
+                            logging.debug("sendTpAndSl: Protection order %s cancelled successfully", protection_order_id)
                         except Exception as e:
                             logging.error(f"sendTpAndSl: Error cancelling protection order {protection_order_id}: {e}")
                             logging.error("Traceback: %s", traceback.format_exc())
                     else:
                         # Mark that protection order already filled, so we should skip stop loss in sendTpSlBuy/sendTpSlSell
                         entryData['protection_order_filled'] = True
-                        logging.info(f"sendTpAndSl: Marked protection_order_filled=True for entryData, will skip stop loss order placement")
+                        logging.debug("sendTpAndSl: Marked protection_order_filled=True, will skip stop loss order placement")
             
             try:
                 # Use nest_asyncio to allow nested event loops
@@ -6265,24 +6265,22 @@ def sendTpAndSl(connection, entryData):
                             option_params = params
                             # Remove from pending after use
                             del Config.option_trade_params[trade_key]
-                            logging.info("Found option trade parameters for %s: %s", symbol, option_params)
+                            logging.debug("Found option trade parameters for %s: %s", symbol, option_params)
                             break
                 
                 # Store option params in entryData for use in sendTpSlBuy/sendTpSlSell
                 if option_params:
                     entryData['option_params'] = option_params
-                    logging.info("Stored option_params in entryData for %s", symbol)
+                    logging.debug("Stored option_params in entryData for %s", symbol)
                 
                 if (entryData['action'] == "BUY"):
-                    logging.info("Market order filled we will send buy Order, market data is %s",entryData)
+                    logging.debug("sendTpAndSl: scheduling sendTpSlSell for orderId=%s", entryData.get('orderId'))
                     future = asyncio.ensure_future(sendTpSlSell(connection, entryData))
                     future.add_done_callback(task_done_callback)
-                    logging.info("Scheduled sendTpSlSell future: %s", future)
                 else:
-                    logging.info("Market order filled we will send sell Order, market data is %s",entryData)
+                    logging.debug("sendTpAndSl: scheduling sendTpSlBuy for orderId=%s", entryData.get('orderId'))
                     future = asyncio.ensure_future(sendTpSlBuy(connection, entryData))
                     future.add_done_callback(task_done_callback)
-                    logging.info("Scheduled sendTpSlBuy future: %s", future)
             except Exception as e:
                 logging.error("Error scheduling TP/SL async function: %s", e)
                 logging.error("Traceback: %s", traceback.format_exc())
@@ -6291,11 +6289,8 @@ def sendTpAndSl(connection, entryData):
         if ( (entryData['status'] == "Filled") and ((entryData['ordType'] == "StopLoss") or (entryData['ordType'] == "TakeProfit")) ):
             parentData = entryData.get('entryData', {})
             
-            # Debug logging to trace barType
-            logging.info("sendTpAndSl: StopLoss/TakeProfit filled - entryData barType=%s, parentData keys=%s, parentData barType=%s", 
-                        entryData.get('barType'), list(parentData.keys()) if parentData else 'None', parentData.get('barType') if parentData else 'None')
-            logging.info("sendTpAndSl: Config.entryTradeType[6]=%s (PBe1)", 
-                        Config.entryTradeType[6] if len(Config.entryTradeType) > 6 else 'N/A')
+            logging.debug("sendTpAndSl: StopLoss/TakeProfit filled - barType=%s, parentBarType=%s",
+                           entryData.get('barType'), parentData.get('barType') if parentData else 'None')
             
             # If parentData is empty or doesn't have barType, try to get it from orderStatusData
             if not parentData or not parentData.get('barType'):
@@ -6310,7 +6305,7 @@ def sendTpAndSl(connection, entryData):
                             entry_order_data = Config.orderStatusData.get(entry_order_id, {})
                             if entry_order_data:
                                 parentData = entry_order_data
-                                logging.info("sendTpAndSl: Retrieved parentData from orderStatusData[%s], barType=%s", entry_order_id, parentData.get('barType'))
+                                logging.debug("sendTpAndSl: Retrieved parentData from orderStatusData[%s], barType=%s", entry_order_id, parentData.get('barType'))
                         except (ValueError, TypeError) as e:
                             logging.warning("sendTpAndSl: Could not parse entry order ID from ocaGroup=%s: %s", oca_group, e)
             
@@ -8372,18 +8367,18 @@ def sendTakeProfit(connection, entryData,price,action):
                                                         totalQuantity=entryData['totalQuantity'], lmtPrice=price, tif=entryData['tif'],
                                                         ocaGroup="tp" + str(oca_id), ocaType=1), outsideRth=entryData['outsideRth'])
         StatusUpdate(lmtResponse, 'TakeProfit', entryData['contract'], 'LMT', action, entryData['totalQuantity'], entryData['histData'], price, entryData['usersymbol'], entryData['timeFrame'], entryData['profit'], entryData['stopLoss'], entryData['risk'],entryData,'','','','',entryData['slValue'],entryData['breakEven'],entryData['outsideRth'] )
-        # Do NOT start takeProfitThread for Manual Order or RBB with Custom/HOD/LOD stop - TP is FIXED (e.g. entry ± multiplier×stop_size).
-        # takeProfitThread overwrites TP with bar low/high each bar; the overwrite often appears during RTH (DAY) when the thread
-        # first runs with regular-hours bar data, even if the trade was placed OTH.
+        # Do NOT start takeProfitThread when TP is FIXED (e.g. entry ± multiplier×stop_size).
+        # takeProfitThread overwrites TP with bar low/high each bar; for PBe1/PBe2 and RBB Custom/HOD/LOD we must keep the formula-based TP.
         is_fixed_tp = (
             entryData.get('barType') in Config.manualOrderTypes
             or (entryData.get('barType') == Config.entryTradeType[5] and entryData.get('stopLoss') in (Config.stopLoss[1], Config.stopLoss[3], Config.stopLoss[4]))  # RBB with Custom/HOD/LOD
+            or entryData.get('barType') in (Config.entryTradeType[6], Config.entryTradeType[7])  # PBe1, PBe2: TP = entry ± multiplier*stop_size, do not overwrite with bar high/low
         )
         if entryData['profit'] == Config.takeProfit[4] and not is_fixed_tp:
             loop = asyncio.get_event_loop()
             asyncio.ensure_future(takeProfitThread(connection, entryData,price,action,lmtResponse.order.orderId))
         elif entryData['profit'] == Config.takeProfit[4] and is_fixed_tp:
-            logging.info(f"sendTakeProfit: NOT starting takeProfitThread - fixed TP (Manual Order or RBB Custom/HOD/LOD), barType={entryData.get('barType')}, stopLoss={entryData.get('stopLoss')}")
+            logging.info(f"sendTakeProfit: NOT starting takeProfitThread - fixed TP (Manual/RBB Custom-HOD-LOD/PBe1/PBe2), barType={entryData.get('barType')}, stopLoss={entryData.get('stopLoss')}")
     except Exception as e:
         logging.error("error in sending Take Profit %s ", e)
         print(e)

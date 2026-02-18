@@ -81,9 +81,8 @@ class connection:
             ord_type = data.get('ordType', '')
             bar_type = data.get('barType', '')
             
-            # Detailed logging for debugging
-            logging.info("orderStatusEvent: orderId=%s, status=%s, barType=%s, ordType=%s, outsideRth=%s, is_manual_order=%s, is_extended_hours=%s",
-                        trade.order.orderId, trade.orderStatus.status, bar_type, ord_type, is_extended_hours, is_manual_order, is_extended_hours)
+            logging.debug("orderStatusEvent: orderId=%s, status=%s, barType=%s, ordType=%s, outsideRth=%s, is_manual_order=%s, is_extended_hours=%s",
+                         trade.order.orderId, trade.orderStatus.status, bar_type, ord_type, is_extended_hours, is_manual_order, is_extended_hours)
             
             # Logic: Send TP/SL if:
             # 1. It's a manual order in extended hours (they need TP/SL after fill, not bracket orders)
@@ -385,8 +384,8 @@ class connection:
                                 entry_order_id = int(str(oca_group).replace('tp', ''))
                                 parent_data = Config.orderStatusData.get(entry_order_id)
                                 if parent_data:
-                                    logging.info("orderStatusEvent: Resolved parentData from ocaGroup %s (entry orderId=%s) for replay",
-                                                 oca_group, entry_order_id)
+                                    logging.debug("orderStatusEvent: Resolved parentData from ocaGroup %s (entry orderId=%s) for replay",
+                                              oca_group, entry_order_id)
                             except (ValueError, TypeError) as e:
                                 logging.warning("orderStatusEvent: Could not parse entry order ID from ocaGroup=%s: %s", oca_group, e)
                     if parent_data:
@@ -397,8 +396,8 @@ class connection:
                             'entryData': parent_data,
                             'barType': data.get('barType'),
                         }
-                        logging.info("orderStatusEvent: Stock %s filled (RTH), calling sendTpAndSl for replay (entry orderId=%s)",
-                                    ord_type, parent_data.get('orderId'))
+                        logging.debug("orderStatusEvent: Stock %s filled (RTH), calling sendTpAndSl for replay (entry orderId=%s)",
+                                      ord_type, parent_data.get('orderId'))
                         sendTpAndSl(self, payload)
                     else:
                         logging.warning("orderStatusEvent: Stock %s filled but no entryData/parentId for replay (orderId=%s)",
@@ -431,8 +430,7 @@ class connection:
                         pass
                 data['filledPrice'] = getattr(trade.orderStatus, 'avgFillPrice', None) or Config.orderFilledPrice.get(trade.order.orderId)
                 Config.orderStatusData[trade.order.orderId] = data
-                logging.info("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s",
-                            trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
+                logging.debug("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s", trade.order.orderId, bar_type, ord_type)
                 sendTpAndSl(self, data)
                 # Option entry at same time as stock fill (not tied to TP/SL). sendTpAndSl may have
                 # added option_params to data; option module computes SL/TP from entry_data histData if needed.
@@ -442,11 +440,9 @@ class connection:
                 except Exception as opt_e:
                     logging.debug("orderStatusEvent: Option on_stock_entry_fill: %s", opt_e)
             elif should_send_tp_sl:
-                logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s, status=%s (status != 'Filled' or ordType != 'Entry')",
-                            trade.order.orderId, bar_type, ord_type, trade.orderStatus.status)
+                logging.debug("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s (status/ordType)", trade.order.orderId)
             else:
-                logging.info("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s (should_send_tp_sl=False)",
-                            trade.order.orderId, bar_type, ord_type)
+                logging.debug("orderStatusEvent: NOT calling sendTpAndSl for orderId=%s (should_send_tp_sl=False)", trade.order.orderId)
 
             # Option entry at same time as stock fill: when Entry Filled but sendTpAndSl was not called
             # (e.g. manual/Custom in RTH use bracket orders, so we skip sendTpAndSl but must still trigger option).
@@ -461,7 +457,7 @@ class connection:
                         pass
                 data['filledPrice'] = getattr(trade.orderStatus, 'avgFillPrice', None) or Config.orderFilledPrice.get(trade.order.orderId)
                 Config.orderStatusData[trade.order.orderId] = data
-                logging.info("orderStatusEvent: Entry filled (no sendTpAndSl), triggering option on_stock_entry_fill for orderId=%s", trade.order.orderId)
+                logging.debug("orderStatusEvent: Entry filled (no sendTpAndSl), triggering option on_stock_entry_fill for orderId=%s", trade.order.orderId)
                 try:
                     from OptionTrading import on_stock_entry_fill
                     on_stock_entry_fill(self, trade.order.orderId)
@@ -516,7 +512,7 @@ class connection:
                 account_values = self.getAccountValue()
                 if account_values and len(account_values) > 0:
                     self.account_id = account_values[0].account
-                    logging.info("Primary account_id set from getAccountValue: %s", self.account_id)
+                    logging.debug("Primary account_id set from getAccountValue: %s", self.account_id)
             except Exception as e:
                 logging.warning("Could not set account_id for OCA orders: %s", e)
 
@@ -553,7 +549,7 @@ class connection:
                 self.ib.waitOnUpdate(timeout=1)
 
             if self.ib.client.isReady():
-                logging.info(
+                logging.debug(
                     "Order ID initialization: IB client is ready; "
                     "get_next_order_id() will use ib.client.getReqId() "
                     "for all new order IDs."
@@ -694,7 +690,7 @@ class connection:
                 else:
                     asyncio.ensure_future(self.pnlData())
                 print(f"PnL request successful for account: {account}")
-                logging.info(f"PnL tracking enabled for account: {account}")
+                logging.debug(f"PnL tracking enabled for account: {account}")
             else:
                 if retry_count < max_retries:
                     logging.info(f"reqPnl: Account values not available yet, retrying in 1 second... (attempt {retry_count + 1}/{max_retries})")
@@ -752,7 +748,7 @@ class connection:
     def placeTrade(self, contract, order, outsideRth=False, **kwargs):
         # nest_asyncio.apply()
         session = self._get_current_session()
-        logging.info("placeTrade: session=%s, outsideRth=%s, orderType=%s", session, outsideRth, order.orderType)
+        logging.debug("placeTrade: session=%s, outsideRth=%s, orderType=%s", session, outsideRth, order.orderType)
         
         if outsideRth == False or outsideRth == 'False':
             order.outsideRth = False
@@ -762,14 +758,14 @@ class connection:
             if session == 'OVERNIGHT':
                 # Overnight: ALL orders must be converted to LMT - no exceptions
                 originalOrderType = order.orderType
-                logging.info(f"Overnight session: Converting order type {originalOrderType} to LMT")
+                logging.debug(f"Overnight session: Converting order type {originalOrderType} to LMT")
                 
                 try:
                     # If already LMT, check if lmtPrice exists, otherwise get price
                     if order.orderType == 'LMT':
                         if not hasattr(order, 'lmtPrice') or order.lmtPrice is None or order.lmtPrice == 0:
                             # LMT order without price - need to get price
-                            logging.info("Overnight session: LMT order without price, getting price from market data")
+                            logging.debug("Overnight session: LMT order without price, getting price from market data")
                             limitPrice = self._get_price_for_overnight_order(contract, order.action)
                             order.lmtPrice = limitPrice
                             logging.info(f"Overnight session: Set LMT price to {limitPrice}")
@@ -790,7 +786,7 @@ class connection:
                             limitPrice = order.auxPrice
                             logging.info(f"Overnight session: Using auxPrice {limitPrice} for STP conversion")
                         else:
-                            logging.info("Overnight session: No auxPrice, getting market price for STP conversion")
+                            logging.debug("Overnight session: No auxPrice, getting market price for STP conversion")
                             limitPrice = self._get_price_for_overnight_order(contract, order.action)
                         order.orderType = 'LMT'
                         order.lmtPrice = limitPrice
@@ -810,7 +806,7 @@ class connection:
                             limitPrice = order.auxPrice
                             logging.info(f"Overnight session: Using auxPrice {limitPrice}")
                         else:
-                            logging.info("Overnight session: Getting market price for order conversion")
+                            logging.debug("Overnight session: Getting market price for order conversion")
                             limitPrice = self._get_price_for_overnight_order(contract, order.action)
                         
                         order.orderType = 'LMT'
@@ -965,7 +961,7 @@ class connection:
 
     def getFullDayData(self, ibcontract, timeFrame, configTime):
         nest_asyncio.apply()
-        logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
+        logging.debug("we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
         histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr=Config.durationStr, barSizeSetting=timeFrame,
                                              useRTH=False)
         # if (len(histData) < (Config.pullBackNo + 2
@@ -1018,7 +1014,7 @@ class connection:
     def getHistoricalChartDataForEntry(self, ibcontract, timeFrame, configTime):
         try:
             nest_asyncio.apply()
-            logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
+            logging.debug("we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
             histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr=Config.durationStr, barSizeSetting=timeFrame,
                                                  useRTH=False)
             if (len(histData) < 2):
@@ -1052,7 +1048,7 @@ class connection:
             # Request enough days for ATR calculation: atrPeriod (20) + buffer for weekends/holidays
             # Request 40 days to ensure we have at least 21 trading days
             duration_days = max(40, Config.atrPeriod + 20)  # At least 40 days, or atrPeriod + 20
-            logging.info("we are getting %s days candle data for %s contract (ATR period=%s)", duration_days, ibcontract, Config.atrPeriod)
+            logging.debug("we are getting %s days candle data for %s contract (ATR period=%s)", duration_days, ibcontract, Config.atrPeriod)
             histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr=f'{duration_days} D', barSizeSetting='1 day',
                                                  useRTH=False)
 
@@ -1068,11 +1064,11 @@ class connection:
     def get_recent_close_price_data(self, ibcontract, timeFrame, configTime):
         try:
             nest_asyncio.apply()
-            logging.info("for close price we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime,
+            logging.debug("for close price we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime,
                          timeFrame, ibcontract)
             histData = self.getChartData(ibcontract, timeFrame, configTime)
             if (len(histData) == 0):
-                logging.info("historical data not found for close price %s contract , time frame %s, time %s", ibcontract,
+                logging.debug("historical data not found for close price %s contract , time frame %s, time %s", ibcontract,
                              timeFrame, configTime)
                 return {}
 
@@ -1090,7 +1086,7 @@ class connection:
     def lb1_entry_historical_data(self, ibcontract, timeFrame, configTime):
         try:
             nest_asyncio.apply()
-            logging.info("entry_historical_data we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
+            logging.debug("entry_historical_data we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
             histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr=Config.durationStr, barSizeSetting=timeFrame,
                                                  useRTH=False)
             if (len(histData) < 2):
@@ -1116,7 +1112,7 @@ class connection:
     def pbe1_entry_historical_data(self, ibcontract, timeFrame, configTime):
         try:
             nest_asyncio.apply()
-            logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
+            logging.debug("we are getting chart date of %s time and for %s time frame and  for %s contract ", configTime, timeFrame, ibcontract)
             histData = self.ib.reqHistoricalData(contract=ibcontract, endDateTime='', formatDate=1, whatToShow=Config.whatToShow, durationStr=Config.durationStr, barSizeSetting=timeFrame,
                                                  useRTH=False)
             if (len(histData) < 2):
@@ -1165,7 +1161,7 @@ class connection:
             logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ",configTime,timeFrame,ibcontract)
             histData = self.getChartData(ibcontract,timeFrame,configTime)
             if(len(histData) == 0):
-                logging.info("historical data not found for %s contract , time frame %s, time %s",ibcontract,timeFrame,configTime)
+                logging.debug("historical data not found for %s contract , time frame %s, time %s",ibcontract,timeFrame,configTime)
                 return {}
 
             oldRow=None
@@ -1178,14 +1174,14 @@ class connection:
                 if chart_date == today:
                     lastBarFromToday = data
                 if (today == chart_date) and (data.date.time().replace(microsecond=0).replace(second=0) == configTimeAsTime):
-                    logging.info("we are adding this row in historical %s   {For %s contract }",data,ibcontract)
+                    logging.debug("we are adding this row in historical %s   {For %s contract }",data,ibcontract)
                     historical = {"close": data.close, "open": data.open, "high": data.high, "low": data.low,"dateTime":data.date}
                     break
                 oldRow = data
             # When no bar exactly matches configTime (e.g. current bar not yet complete), use most recent completed bar from today
             if not historical and lastBarFromToday is not None:
                 historical = {"close": lastBarFromToday.close, "open": lastBarFromToday.open, "high": lastBarFromToday.high, "low": lastBarFromToday.low,"dateTime":lastBarFromToday.date}
-                logging.info("RBB: no exact bar for %s; using last completed bar from today %s for %s", configTimeAsTime, lastBarFromToday.date, ibcontract)
+                logging.debug("RBB: no exact bar for %s; using last completed bar from today %s for %s", configTimeAsTime, lastBarFromToday.date, ibcontract)
             logging.info("historical data found %s ",historical)
             return historical
         except Exception as e:
@@ -1198,7 +1194,7 @@ class connection:
             logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ",configTime,timeFrame,ibcontract)
             histData = self.getChartData(ibcontract,timeFrame,configTime)
             if(len(histData) == 0):
-                logging.info("historical data not found for %s contract , time frame %s, time %s",ibcontract,timeFrame,configTime)
+                logging.debug("historical data not found for %s contract , time frame %s, time %s",ibcontract,timeFrame,configTime)
                 return {}
 
             oldRow=None
@@ -1209,10 +1205,10 @@ class connection:
                 if len(histData) > 0:
                     latest_bar = histData[-1]
                     historical = {"close": latest_bar.close, "open": latest_bar.open, "high": latest_bar.high, "low": latest_bar.low, "dateTime": latest_bar.date}
-                    logging.info("historical data found (latest bar, no time filter) %s ", historical)
+                    logging.debug("historical data found (latest bar, no time filter) %s ", historical)
                     return historical
                 else:
-                    logging.info("No historical data available")
+                    logging.debug("No historical data available")
                     return {}
 
             configTime = configTime.time().replace(microsecond=0)
@@ -1225,12 +1221,12 @@ class connection:
 
                 if (datetime.datetime.now().date() == chart_date) and (data.date.time() >= configTime):
                     if(oldRow != None and (oldRow.date.time() == configTime)):
-                        logging.info("we are adding this row in historical %s   {For %s contract }",oldRow,ibcontract)
+                        logging.debug("we are adding this row in historical %s   {For %s contract }",oldRow,ibcontract)
                         if (data.date.date() == datetime.datetime.now().date()) and (data.date.time() >= datetime.datetime.strptime( str(datetime.datetime.now().date()) + " " + Config.tradingTime,  "%Y-%m-%d %H:%M:%S").time()):
                             historical = {"close": oldRow.close, "open": oldRow.open, "high": oldRow.high, "low": oldRow.low,"dateTime":oldRow.date}
                             break
                 oldRow = data
-            logging.info("historical data found %s ",historical)
+            logging.debug("historical data found %s ",historical)
             return historical
         except Exception as e:
             logging.error('getHistoricalData ' + str(e))
@@ -1248,7 +1244,7 @@ class connection:
         try:
             val = self.ib.accountValues()
             if val and len(val) > 0:
-                logging.info("Account value found: " + str(val[:3]))  # Log first 3 items
+                logging.debug("Account value found: " + str(val[:3]))  # Log first 3 items
             else:
                 logging.warning("No account values returned from IB")
             return val
@@ -1279,7 +1275,7 @@ class connection:
     def getTickByTick(self,currencyPair):
         try:
             tickers = self.ib.ticker(currencyPair)
-            logging.info("Ticker Found " + str(tickers))
+            logging.debug("Ticker Found " + str(tickers))
             return tickers
         except Exception as e:
             logging.error('req market data ' + str(e))
@@ -1287,7 +1283,7 @@ class connection:
     def getAllOpenOrder(self):
         try:
             trades = self.ib.openTrades()
-            logging.info('open trades --------------- %s ',trades)
+            logging.debug('open trades --------------- %s ',trades)
             return trades
         except Exception as e:
             logging.error('get all open Trade ' + str(e))
@@ -1295,7 +1291,7 @@ class connection:
     def getAllOpenPosition(self):
         try:
             trades = self.ib.positions()
-            logging.info('open position --------------- %s ',trades)
+            logging.debug('open position --------------- %s ',trades)
             return trades
         except Exception as e:
             logging.error('get all open Trade ' + str(e))

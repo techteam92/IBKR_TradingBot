@@ -6,6 +6,8 @@ import asyncio
 import datetime
 import logging
 import math
+import threading
+import time
 import traceback
 from ib_insync import Option, Order, Stock, PriceCondition
 import Config
@@ -15,6 +17,10 @@ BID_ASK_ADJUST_INTERVAL_SEC = 2.0   # If not filled after this many seconds, adj
 BID_ASK_ADJUST_INCREMENT = 0.05     # Bid+: increase by this; Ask-: decrease by this
 BID_ASK_MAX_ADJUSTMENTS = 20        # Safety limit on number of adjustments
 MIN_OPTION_LIMIT_PRICE = 0.01       # Ask- won't go below this
+
+# Lock to prevent duplicate option exit orders when stock SL/TP fill and option entry fill
+# can be processed concurrently (e.g. from different IB status events).
+_option_exit_placement_lock = threading.Lock()
 
 
 # Placeholder functions - will be implemented
@@ -99,7 +105,7 @@ def _get_nearest_strike_and_expiration(ib, stock_contract, desired_strike, desir
                 except (ValueError, TypeError):
                     return float('inf')
             expiration_date = min(expirations, key=date_dist)
-        logging.info("Option chain snap: desired strike=%s -> %s, desired exp=%s -> %s (tradingClass=%s)",
+        logging.debug("Option chain snap: desired strike=%s -> %s, desired exp=%s -> %s (tradingClass=%s)",
                      desired_strike, strike_price, desired_expiration_yyyymmdd, expiration_date, trading_class)
         return strike_price, expiration_date, trading_class
     except Exception as e:
@@ -145,7 +151,7 @@ def _pre_resolve_option_contract(connection, symbol, entry_price, option_contrac
         qualified = connection.ib.qualifyContracts(option_contract)
         if not qualified:
             return None, None
-        logging.info("Pre-resolved option for price-level trigger: %s %s %s @ entry=%.2f",
+        logging.debug("Pre-resolved option for price-level trigger: %s %s %s @ entry=%.2f",
                      symbol, option_right, snapped_strike, entry_price)
         return qualified[0], option_right
     except Exception as e:
@@ -187,11 +193,11 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
     """
     try:
         if outside_rth or not _is_rth():
-            logging.info("Option trading only runs during RTH; skipping (outside_rth=%s)", outside_rth)
+            logging.debug("Option trading only runs during RTH; skipping (outside_rth=%s)", outside_rth)
             return
-        logging.info("placeOptionTradeAndStore: Starting for %s, contract=%s, expire=%s, entry=%s, sl=%s, tp=%s, risk=%s%s", 
-                    symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, risk_amount,
-                    " (pre-resolved)" if pre_resolved_contract else "")
+        logging.debug("placeOptionTradeAndStore: Starting for %s, contract=%s, expire=%s, entry=%s, sl=%s, tp=%s, risk=%s%s",
+                      symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, risk_amount,
+                      " (pre-resolved)" if pre_resolved_contract else "")
         
         # Get stock contract (needed for stock_exchange and possibly for non-pre-resolved path)
         stock_contract = Stock(symbol, 'SMART', 'USD')
@@ -274,7 +280,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         opt_bid = None
         opt_ask = None
         max_wait_sec = 2.0 if pre_resolved_contract else 5.0
-        check_interval_sec = 0.15 if pre_resolved_contract else 0.4
+        check_interval_sec = 0.1 if pre_resolved_contract else 0.4
         waited = 0.0
         while waited < max_wait_sec:
             await asyncio.sleep(check_interval_sec)
@@ -286,19 +292,19 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
             mark_price = getattr(option_ticker, "markPrice", None)
             if last is not None and last == last and last > 0:
                 opt_price = last
-                logging.info("Option price from last: %.2f (waited %.1fs)", opt_price, waited)
+                logging.debug("Option price from last: %.2f (waited %.1fs)", opt_price, waited)
                 break
             if opt_bid is not None and opt_ask is not None and opt_bid == opt_bid and opt_ask == opt_ask and opt_bid > 0 and opt_ask > 0:
                 opt_price = (opt_bid + opt_ask) / 2.0
-                logging.info("Option price from bid/ask: %.2f (waited %.1fs)", opt_price, waited)
+                logging.debug("Option price from bid/ask: %.2f (waited %.1fs)", opt_price, waited)
                 break
             if close is not None and close == close and close > 0:
                 opt_price = close
-                logging.info("Option price from close: %.2f (waited %.1fs)", opt_price, waited)
+                logging.debug("Option price from close: %.2f (waited %.1fs)", opt_price, waited)
                 break
             if mark_price is not None and mark_price == mark_price and mark_price > 0:
                 opt_price = mark_price
-                logging.info("Option price from mark: %.2f (waited %.1fs)", opt_price, waited)
+                logging.debug("Option price from mark: %.2f (waited %.1fs)", opt_price, waited)
                 break
         connection.ib.cancelMktData(option_contract)
         # Re-read bid/ask for order placement (may have updated)
@@ -324,7 +330,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                     option_quantity = int(round(risk_amt / (opt_price * 100)))
                     if option_quantity <= 0:
                         option_quantity = 1
-                    logging.info("Option quantity calculated: risk=%s, opt_price=%s, quantity=%s (rounded)", risk_amt, opt_price, option_quantity)
+                    logging.debug("Option quantity calculated: risk=%s, opt_price=%s, quantity=%s (rounded)", risk_amt, opt_price, option_quantity)
             except (ValueError, TypeError):
                 logging.warning("Invalid risk amount: %s, using quantity=1", risk_amount)
         
@@ -364,7 +370,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                 logging.error("Failed to place option entry order (immediate)")
                 return
             option_entry_order_id = trade.order.orderId
-            logging.info("Option entry placed immediately (by price level): %s %d %s, orderId=%s",
+            logging.info("Option entry placed: %s %d contract(s), orderId=%s",
                         action, option_quantity, "call" if option_right == 'C' else "put", option_entry_order_id)
             # Store order data and SL/TP params (option exit when stock TP or SL fills)
             if option_entry_order_id not in Config.orderStatusData:
@@ -406,29 +412,9 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                 if 'option_orders' not in Config.orderStatusData[stock_entry_order_id]:
                     Config.orderStatusData[stock_entry_order_id]['option_orders'] = {}
                 Config.orderStatusData[stock_entry_order_id]['option_orders']['entry'] = option_entry_order_id
-                # Race: stock TP/SL can fill in same second as entry before option is placed. If already filled, trigger option exit now.
-                option_entry_data = Config.orderStatusData.get(option_entry_order_id)
-                for oid, odata in list(Config.orderStatusData.items()):
-                    ed = odata.get('entryData')
-                    if not isinstance(ed, dict) or ed.get('orderId') != stock_entry_order_id:
-                        continue
-                    ord_type = odata.get('ordType')
-                    status = odata.get('status')
-                    if ord_type == 'TakeProfit' and status == 'Filled' and option_entry_data:
-                        tp_params = option_entry_data.get('option_tp_params')
-                        if tp_params:
-                            logging.info("Stock take profit already Filled when option entry placed (stock orderId=%s) -> Placing option exit now", oid)
-                            asyncio.ensure_future(
-                                placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
-                            )
-                    elif ord_type == 'StopLoss' and status == 'Filled' and option_entry_data:
-                        sl_params = option_entry_data.get('option_sl_params')
-                        if sl_params:
-                            logging.info("Stock stop loss already Filled when option entry placed (stock orderId=%s) -> Placing option exit now", oid)
-                            asyncio.ensure_future(
-                                placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
-                            )
-            logging.info("Option entry order placed and stored: orderId=%s, stock_entry_order_id=%s",
+                # Store so handleOptionEntryFill can place option exit after option entry fills (not here, to avoid "both sides" rejection).
+                Config.orderStatusData[option_entry_order_id]['stock_entry_order_id'] = stock_entry_order_id
+            logging.debug("Option entry order placed and stored: orderId=%s, stock_entry_order_id=%s",
                         option_entry_order_id, stock_entry_order_id)
             # Start Bid+/Ask- adjustment loop for immediate option entry (2s interval, ±$0.05, max 20)
             if entry_order_type in ('Bid+', 'Ask-') and getattr(order, 'lmtPrice', 0) and order.lmtPrice > 0:
@@ -447,14 +433,14 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                     # Price is already at or above entry - condition already met
                     # Don't place order yet, store for monitoring
                     should_place_order = False
-                    logging.info("Option entry: Current price (%.2f) is already at/above entry (%.2f). Storing order for monitoring instead of placing immediately.", 
+                    logging.debug("Option entry: Current price (%.2f) is already at/above entry (%.2f). Storing order for monitoring instead of placing immediately.", 
                                 current_stock_price, entry_price)
             else:  # Breaks below (SELL)
                 if current_stock_price <= entry_price:
                     # Price is already at or below entry - condition already met
                     # Don't place order yet, store for monitoring
                     should_place_order = False
-                    logging.info("Option entry: Current price (%.2f) is already at/below entry (%.2f). Storing order for monitoring instead of placing immediately.", 
+                    logging.debug("Option entry: Current price (%.2f) is already at/below entry (%.2f). Storing order for monitoring instead of placing immediately.", 
                                 current_stock_price, entry_price)
         
         if not should_place_order:
@@ -482,7 +468,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                 'buy_sell_type': buy_sell_type,
                 'stock_entry_order_id': stock_entry_order_id
             }
-            logging.info("Option entry order stored for monitoring. Will be placed when price crosses entry threshold.")
+            logging.debug("Option entry order stored for monitoring. Will be placed when price crosses entry threshold.")
             # Start monitoring task
             asyncio.ensure_future(
                 monitorAndPlacePendingOptionEntry(connection, pending_key, entry_price, trigger_method)
@@ -491,7 +477,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         
         # Current price is not at/beyond entry price - safe to place conditional order
         # Entry: If SPY crosses 680.54, buy X contracts
-        logging.info("Option entry: Using exact entry_price=%.2f for conditional order (current_price=%.2f)", 
+        logging.debug("Option entry: Using exact entry_price=%.2f for conditional order (current_price=%.2f)", 
                     entry_price, current_stock_price)
         
         # Create entry order (using OptionEntry trade type for unique ID range)
@@ -535,7 +521,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         )
         order.conditions = [condition]
         order.conditionsIgnoreRth = False
-        logging.info("Option entry order will be conditional: If %s %s %.2f, then %s %d contracts (%s)",
+        logging.debug("Option entry order will be conditional: If %s %s %.2f, then %s %d contracts (%s)",
                     symbol, "crosses above" if trigger_method == 1 else "breaks below", entry_price,
                     action, option_quantity, entry_order_type)
         
@@ -546,7 +532,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
             return
         
         option_entry_order_id = trade.order.orderId
-        logging.info("Option entry order placed (conditional): If %s %s %.2f, then %s %d contracts (%s), orderId=%s",
+        logging.debug("Option entry order placed (conditional): If %s %s %.2f, then %s %d contracts (%s), orderId=%s",
                     symbol, "crosses above" if trigger_method == 1 else "breaks below", entry_price,
                     action, option_quantity, entry_order_type, option_entry_order_id)
         
@@ -613,7 +599,7 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                 monitorAndAdjustBidAskOrder(connection, trade, entry_order_type, initial_limit_price, action)
             )
         
-        logging.info("Option entry order placed and stored: orderId=%s, stock_entry_order_id=%s", 
+        logging.debug("Option entry order placed and stored: orderId=%s, stock_entry_order_id=%s", 
                     option_entry_order_id, stock_entry_order_id)
         
     except Exception as e:
@@ -630,10 +616,10 @@ async def placeOptionEntryOrderImmediately(connection, stock_entry_order_id, sym
     """
     try:
         if outside_rth or not _is_rth():
-            logging.info("Option trading only runs during RTH; skipping placeOptionEntryOrderImmediately (outside_rth=%s)", outside_rth)
+            logging.debug("Option trading only runs during RTH; skipping placeOptionEntryOrderImmediately (outside_rth=%s)", outside_rth)
             return
-        logging.info("placeOptionEntryOrderImmediately: Placing option entry order for %s, entry=%.2f, sl=%.2f, tp=%.2f", 
-                    symbol, entry_price, stop_loss_price, profit_price)
+        logging.debug("placeOptionEntryOrderImmediately: Placing option entry order for %s, entry=%.2f, sl=%.2f, tp=%.2f",
+                      symbol, entry_price, stop_loss_price, profit_price)
         
         # Place option entry order immediately (conditional: if stock crosses entry price, buy option contracts)
         await placeOptionTradeAndStore(
@@ -655,7 +641,7 @@ async def placeOptionEntryOrderImmediately(connection, stock_entry_order_id, sym
             outside_rth=outside_rth,
             from_entry_fill=True,
         )
-        logging.info("Option entry order placed immediately for %s (will trigger when stock price crosses %.2f)", 
+        logging.debug("Option entry order placed immediately for %s (will trigger when stock price crosses %.2f)", 
                     symbol, entry_price)
     except Exception as e:
         logging.error("Error in placeOptionEntryOrderImmediately: %s", e)
@@ -680,18 +666,27 @@ def on_stock_entry_fill(connection, stock_entry_order_id):
 
 def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data):
     """
-    Option logic (separate from stock). Option entry is triggered ONLY by price level
-    (when underlying reaches entry), not by stock order fill. Triggering on fill causes
-    2–5s delay and is disabled. Skip placing option here; the price-level monitor handles it.
+    When option_trigger_by_price_level is set (Custom entry + EntryBar etc.): option is
+    independent of the stock; it triggers only when price crosses entry (monitor path).
+    Do not place option from stock fill in that case.
+    Otherwise: place option when stock entry fills (fill path).
     """
     try:
-        # Option entry is always by price level only; never trigger on stock fill (too slow).
-        logging.debug("handleOptionTradingForEntryFill: Option entry is by price level only, skipping fill-based trigger for orderId=%s", stock_entry_order_id)
-        return
-        # Avoid double placement: if option was already triggered (e.g. parallel path), skip
+        # Resolve entry_data so we can check option_trigger_by_price_level
+        if not isinstance(entry_data, dict):
+            entry_data = Config.orderStatusData.get(stock_entry_order_id, {})
+        # Option only triggers from price: do not place from stock fill; monitor will place when price crosses
+        if entry_data.get('option_trigger_by_price_level'):
+            logging.debug("handleOptionTradingForEntryFill: Option triggers by price level for orderId=%s, skipping (option independent of stock fill)", stock_entry_order_id)
+            return
+        # Avoid double placement: if option was already triggered (e.g. by price-level monitor), skip
         if Config.orderStatusData.get(int(stock_entry_order_id), {}).get('option_entry_triggered'):
             logging.debug("handleOptionTradingForEntryFill: Option already triggered for orderId=%s, skipping", stock_entry_order_id)
             return
+        # Claim trigger so price-level monitor skips while we resolve params and place (prevents race)
+        if int(stock_entry_order_id) not in Config.orderStatusData:
+            Config.orderStatusData[int(stock_entry_order_id)] = {}
+        Config.orderStatusData[int(stock_entry_order_id)]['option_entry_triggered'] = True
         symbol = entry_data.get('usersymbol') if isinstance(entry_data, dict) else None
         timeFrame = entry_data.get('timeFrame') if isinstance(entry_data, dict) else None
         barType = entry_data.get('barType') if isinstance(entry_data, dict) else None
@@ -709,7 +704,7 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
         option_params = None
         if isinstance(entry_data, dict) and entry_data.get('option_params'):
             option_params = entry_data.get('option_params')
-            logging.info("Option trading: Using option_params from entryData for %s", symbol)
+            logging.debug("Option trading: Using option_params from entryData for %s", symbol)
         elif hasattr(Config, 'option_trade_params') and Config.option_trade_params:
             matching_key = None
             matching_params = None
@@ -728,10 +723,11 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
             if matching_key and matching_params and matching_params.get('enabled'):
                 option_params = matching_params
                 del Config.option_trade_params[matching_key]
-                logging.info("Retrieved option params from Config.option_trade_params for %s", symbol)
+                logging.debug("Retrieved option params from Config.option_trade_params for %s", symbol)
         
         if not option_params or not option_params.get('enabled'):
             logging.warning("Option trading: No option params found or not enabled for %s", symbol)
+            Config.orderStatusData[int(stock_entry_order_id)]['option_entry_triggered'] = False  # release so price-level monitor can place
             return
         
         # Get prices from entry_data
@@ -775,19 +771,16 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
                         if not profit_price and stop_loss_price:
                             profit_price = get_tp_for_buying(connection, time_frame, contract, profit_type, entry_stop_price, hist_data, stop_loss_type)
                     if stop_loss_price is not None and profit_price is not None:
-                        logging.info("handleOptionTradingForEntryFill: Computed SL=%.2f, TP=%.2f (parallel path, entry=%.2f)", stop_loss_price, profit_price, entry_price)
+                        logging.debug("handleOptionTradingForEntryFill: Computed SL=%.2f, TP=%.2f (parallel path, entry=%.2f)", stop_loss_price, profit_price, entry_price)
             except Exception as comp_e:
                 logging.debug("handleOptionTradingForEntryFill: Could not compute SL/TP (will rely on sendTpAndSl): %s", comp_e)
         
-        logging.info("handleOptionTradingForEntryFill: Using entry_price=%.2f (from option_entry_price=%s, filledPrice=%s, lastPrice=%s)", 
+        logging.debug("handleOptionTradingForEntryFill: Using entry_price=%.2f (from option_entry_price=%s, filledPrice=%s, lastPrice=%s)", 
                     entry_price, entry_data.get('option_entry_price'), entry_data.get('filledPrice'), entry_data.get('lastPrice'))
         
         if entry_price and stop_loss_price and profit_price:
-            # Avoid double placement
-            if int(stock_entry_order_id) not in Config.orderStatusData:
-                Config.orderStatusData[int(stock_entry_order_id)] = {}
-            Config.orderStatusData[int(stock_entry_order_id)]['option_entry_triggered'] = True
             # Place option orders asynchronously (from_entry_fill=True so we place immediately, not deferred to monitoring)
+            # option_entry_triggered already set at start of this function
             asyncio.ensure_future(
                 placeOptionTradeAndStore(
                     connection,
@@ -808,14 +801,21 @@ def handleOptionTradingForEntryFill(connection, stock_entry_order_id, entry_data
                     from_entry_fill=True,
                 )
             )
-            logging.info("Option orders scheduled for %s (entry filled): entry=%s, sl=%s, tp=%s", 
+            logging.debug("Option by fill (same condition as stock entry): %s entry=%s, sl=%s, tp=%s", 
                         symbol, entry_price, stop_loss_price, profit_price)
         else:
             logging.warning("Option trading: Cannot place option orders - missing prices: entry=%s, sl=%s, tp=%s", 
                            entry_price, stop_loss_price, profit_price)
+            Config.orderStatusData[int(stock_entry_order_id)]['option_entry_triggered'] = False  # release so price-level monitor can place
     except Exception as e:
         logging.error("Error in handleOptionTradingForEntryFill: %s", e)
         logging.error(traceback.format_exc())
+        # Release claim so price-level monitor can place if fill path failed
+        try:
+            if int(stock_entry_order_id) in Config.orderStatusData:
+                Config.orderStatusData[int(stock_entry_order_id)]['option_entry_triggered'] = False
+        except Exception:
+            pass
 
 
 async def _wait_next_tick(ticker, timeout_sec=0.4):
@@ -843,13 +843,35 @@ async def _wait_next_tick(ticker, timeout_sec=0.4):
             pass
 
 
+async def _wait_for_option_entry_fill(connection, option_entry_order_id, timeout_sec=25):
+    """
+    Wait until the option entry order is Filled (or Cancelled/Inactive).
+    IB does not allow open BUY and SELL on the same US option; we must place the exit only after entry has filled.
+    Returns True if status is Filled, False if timeout or order cancelled.
+    """
+    start = time.monotonic()
+    while (time.monotonic() - start) < timeout_sec:
+        od = Config.orderStatusData.get(option_entry_order_id)
+        status = od.get('status') if od else None
+        if status == 'Filled':
+            return True
+        if status in ('Cancelled', 'Inactive', 'Canceled'):
+            logging.debug("Option entry %s is %s, will not place exit", option_entry_order_id, status)
+            return False
+        await asyncio.sleep(0.25)
+    logging.warning("Timeout waiting for option entry %s to fill (status=%s)", option_entry_order_id, Config.orderStatusData.get(option_entry_order_id, {}).get('status'))
+    return False
+
+
 async def monitorUnderlyingAndPlaceOptionOrders(connection, stock_entry_order_id, symbol, entry_price, stop_loss_price,
                                                 tp_price, buy_sell_type, option_params, quantity, tif, pre_resolved_contract=None, pre_resolved_option_right=None):
     """
-    Monitor underlying price and place option entry when price reaches entry level,
-    then place option SL or TP when price reaches those levels. Uses streaming market
-    data (ticker.updateEvent) to react on every tick and minimize delay.     If
-    pre_resolved_contract is provided, option is placed without refetching stock/chain.
+    Option entry uses the same condition as the stock: it can be triggered when the
+    stock entry order fills (in handleOptionTradingForEntryFill) or when underlying
+    price crosses entry (here). We avoid double placement by checking option_entry_triggered.
+    Monitor underlying price; if entry not yet placed and last crosses entry, place option.
+    Then place option SL/TP when price reaches those levels. Uses streaming market data.
+    If pre_resolved_contract is provided, option is placed without refetching stock/chain.
     """
     stock_ticker = None
     stock_contract = None
@@ -881,26 +903,42 @@ async def monitorUnderlyingAndPlaceOptionOrders(connection, stock_entry_order_id
             # Stop if stock entry order no longer exists or is cancelled
             entry_data = Config.orderStatusData.get(stock_entry_order_id)
             if not entry_data:
-                logging.info("monitorUnderlyingAndPlaceOptionOrders: No orderStatusData for stock entry %s, stopping", stock_entry_order_id)
+                logging.debug("monitorUnderlyingAndPlaceOptionOrders: No orderStatusData for stock entry %s, stopping", stock_entry_order_id)
                 break
             if entry_data.get('status') in ('Cancelled', 'Inactive'):
-                logging.info("monitorUnderlyingAndPlaceOptionOrders: Stock entry %s is %s, stopping", stock_entry_order_id, entry_data.get('status'))
+                logging.debug("monitorUnderlyingAndPlaceOptionOrders: Stock entry %s is %s, stopping", stock_entry_order_id, entry_data.get('status'))
                 break
+            # Use stock bracket's stored levels when available so option and stock stay synchronized
+            synced_entry = entry_data.get('entry_price')
+            synced_tp = entry_data.get('tp_price')
+            synced_sl = entry_data.get('stop_loss_price')
+            if synced_entry is not None:
+                entry_price = float(synced_entry)
+            if synced_tp is not None:
+                tp_price = float(synced_tp)
+            if synced_sl is not None:
+                stop_loss_price = float(synced_sl)
             last = None
             if stock_ticker:
                 last = getattr(stock_ticker, 'last', None) or getattr(stock_ticker, 'close', None)
             if last is None or last <= 0:
                 no_data_count += 1
                 if no_data_count <= 3 or (no_data_count % 20) == 0:
-                    logging.info("monitorUnderlyingAndPlaceOptionOrders: %s no price yet (last=%s) waiting for market data", symbol, last)
+                    logging.debug("monitorUnderlyingAndPlaceOptionOrders: %s no price yet (last=%s) waiting for market data", symbol, last)
                 continue
             no_data_count = 0
             if iter_count <= 3 or (iter_count % 20) == 0:
-                logging.info("monitorUnderlyingAndPlaceOptionOrders: %s last=%.2f entry=%.2f (BUY: need last>=entry; SELL: need last<=entry)", symbol, last, entry_price)
+                logging.debug("monitorUnderlyingAndPlaceOptionOrders: %s last=%.2f entry=%.2f (BUY: need last>=entry; SELL: need last<=entry)", symbol, last, entry_price)
             if not entry_placed:
+                # Option may already have been placed by fill (same condition as stock entry)
+                if Config.orderStatusData.get(stock_entry_order_id, {}).get('option_entry_triggered'):
+                    entry_placed = True
+                    option_entry_order_id = (Config.orderStatusData.get(stock_entry_order_id) or {}).get('option_orders', {}).get('entry')
+                    logging.debug("monitorUnderlyingAndPlaceOptionOrders: Option already triggered (e.g. on fill) for %s, monitoring SL/TP only", symbol)
+                    continue
                 entry_hit = (is_buy and last >= entry_price) or (not is_buy and last <= entry_price)
                 if entry_hit:
-                    logging.info("Option by price: %s reached entry level (price=%.2f, entry=%.2f), placing option entry",
+                    logging.debug("Option by price: %s last=%.2f crossed entry=%.2f, placing option entry",
                                  symbol, last, entry_price)
                     if stock_ticker:
                         connection.ib.cancelMktData(stock_contract)
@@ -933,7 +971,7 @@ async def monitorUnderlyingAndPlaceOptionOrders(connection, stock_entry_order_id
                     if not option_entry_order_id:
                         logging.warning("monitorUnderlyingAndPlaceOptionOrders: Option entry placed but order id not found")
                     else:
-                        logging.info("Option by price: Option entry placed orderId=%s; will monitor for SL/TP levels", option_entry_order_id)
+                        logging.debug("Option by price: Option entry placed orderId=%s; will monitor for SL/TP levels", option_entry_order_id)
                     await asyncio.sleep(1.5)
                     if not stock_ticker:
                         stock_ticker = connection.ib.reqMktData(stock_contract, '', False, False)
@@ -941,7 +979,7 @@ async def monitorUnderlyingAndPlaceOptionOrders(connection, stock_entry_order_id
                 continue
             if not option_entry_order_id or exit_placed:
                 if exit_placed:
-                    logging.info("monitorUnderlyingAndPlaceOptionOrders: Option exit placed for %s, stopping", symbol)
+                    logging.debug("monitorUnderlyingAndPlaceOptionOrders: Option exit placed for %s, stopping", symbol)
                     break
                 option_entry_order_id = (Config.orderStatusData.get(stock_entry_order_id) or {}).get('option_orders', {}).get('entry')
                 continue
@@ -955,13 +993,19 @@ async def monitorUnderlyingAndPlaceOptionOrders(connection, stock_entry_order_id
             sl_hit = (is_buy and last <= stop_loss_price) or (not is_buy and last >= stop_loss_price)
             tp_hit = (is_buy and last >= tp_price) or (not is_buy and last <= tp_price)
             if sl_hit:
-                logging.info("Option by price: %s reached SL level (price=%.2f, sl=%.2f), placing option stop loss", symbol, last, stop_loss_price)
-                await placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
-                exit_placed = True
+                logging.debug("Option by price: %s reached SL level (price=%.2f, sl=%.2f), waiting for option entry to fill before placing exit", symbol, last, stop_loss_price)
+                if await _wait_for_option_entry_fill(connection, option_entry_order_id):
+                    await placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
+                    exit_placed = True
+                else:
+                    logging.warning("Option by price: SL level hit but option entry did not fill in time, skipping option stop loss")
             elif tp_hit:
-                logging.info("Option by price: %s reached TP level (price=%.2f, tp=%.2f), placing option take profit", symbol, last, tp_price)
-                await placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
-                exit_placed = True
+                logging.debug("Option by price: %s reached TP level (price=%.2f, tp=%.2f), waiting for option entry to fill before placing exit", symbol, last, tp_price)
+                if await _wait_for_option_entry_fill(connection, option_entry_order_id):
+                    await placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
+                    exit_placed = True
+                else:
+                    logging.warning("Option by price: TP level hit but option entry did not fill in time, skipping option take profit")
     except Exception as e:
         logging.error("Error in monitorUnderlyingAndPlaceOptionOrders: %s", e)
         logging.error(traceback.format_exc())
@@ -982,7 +1026,7 @@ def startOptionTradingByPriceLevel(connection, stock_entry_order_id, symbol, tim
     """
     try:
         if not _is_rth():
-            logging.info("startOptionTradingByPriceLevel: RTH only, skipping")
+            logging.debug("startOptionTradingByPriceLevel: RTH only, skipping")
             return
         option_params = None
         latest_ts = None
@@ -997,7 +1041,7 @@ def startOptionTradingByPriceLevel(connection, stock_entry_order_id, symbol, tim
                         latest_ts = ts
                         option_params = params
         if not option_params or not option_params.get('enabled'):
-            logging.info("startOptionTradingByPriceLevel: No option params for %s %s %s %s (option by price level skipped)", symbol, timeFrame, barType, buySellType)
+            logging.debug("startOptionTradingByPriceLevel: No option params for %s %s %s %s (option by price level skipped)", symbol, timeFrame, barType, buySellType)
             return
         if stock_entry_order_id not in Config.orderStatusData:
             Config.orderStatusData[stock_entry_order_id] = {}
@@ -1027,10 +1071,10 @@ def startOptionTradingByPriceLevel(connection, stock_entry_order_id, symbol, tim
 
 def handleOptionEntryFill(connection, option_entry_order_id):
     """
-    Handle option entry order fill: Do NOT place stop loss and take profit orders immediately.
-    Option SL/TP orders will be placed only when the corresponding stock SL/TP orders fill
-    (via triggerOptionOrderOnStockFill), not when stock price reaches a level.
-    This prevents premature fills due to conditional order issues.
+    Handle option entry order fill: Option exit (SL/TP) is placed only after the option entry is filled,
+    to avoid IBKR "Cannot have open orders on both sides of the same US Option contract" (Error 201).
+    If the corresponding stock TP/SL was already filled before the option entry filled, place the
+    option exit here (once per type) so we do not place exit while the option entry is still open.
     """
     try:
         option_data = Config.orderStatusData.get(option_entry_order_id)
@@ -1038,10 +1082,57 @@ def handleOptionEntryFill(connection, option_entry_order_id):
             logging.warning("Option entry order %s not found in orderStatusData", option_entry_order_id)
             return
         
-        # Option SL/TP orders will be placed when stock SL/TP orders fill, not immediately
-        # This ensures they only trigger when the actual stock orders fill, not based on price conditions
-        logging.info("Option entry order %s filled. Option SL/TP orders will be placed when stock SL/TP orders fill (not immediately).", option_entry_order_id)
+        logging.debug("Option entry order %s filled. Option SL/TP will be placed when stock SL/TP fill, or now if already filled.", option_entry_order_id)
         
+        # Resolve stock entry for this option (stored when option was placed from stock fill)
+        stock_entry_order_id = option_data.get('stock_entry_order_id')
+        if not stock_entry_order_id:
+            for _sid, _sdata in list(Config.orderStatusData.items()):
+                if _sdata.get('option_orders', {}).get('entry') == option_entry_order_id:
+                    stock_entry_order_id = _sid
+                    break
+        if not stock_entry_order_id:
+            return
+        
+        # When option is triggered by price level only, do not place option exit here;
+        # the price-level monitor is the single source for option exit (avoids duplicate option sell orders).
+        entry_data = Config.orderStatusData.get(stock_entry_order_id)
+        if isinstance(entry_data, dict) and entry_data.get('option_trigger_by_price_level'):
+            logging.debug("handleOptionEntryFill: Option triggers by price level for entry %s, skipping option exit (monitor handles exit)", stock_entry_order_id)
+            return
+        
+        # Place option exit only if corresponding stock TP/SL is already filled (race: stock TP/SL filled before option entry).
+        # Track placed exit types to avoid duplicate orders; use lock so only one of triggerOptionOrderOnStockFill vs
+        # handleOptionEntryFill places the exit when events are processed concurrently.
+        placed = option_data.setdefault('option_exits_placed', set())
+        for oid, odata in list(Config.orderStatusData.items()):
+            ed = odata.get('entryData')
+            if not isinstance(ed, dict) or ed.get('orderId') != stock_entry_order_id:
+                continue
+            ord_type = odata.get('ordType')
+            status = odata.get('status')
+            if ord_type == 'TakeProfit' and status == 'Filled':
+                tp_params = option_data.get('option_tp_params')
+                if tp_params:
+                    with _option_exit_placement_lock:
+                        if 'OptionProfit' in placed:
+                            continue
+                        placed.add('OptionProfit')
+                    logging.debug("Option entry %s filled; stock take profit already filled (orderId=%s) -> placing option exit now", option_entry_order_id, oid)
+                    asyncio.ensure_future(
+                        placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
+                    )
+            elif ord_type == 'StopLoss' and status == 'Filled':
+                sl_params = option_data.get('option_sl_params')
+                if sl_params:
+                    with _option_exit_placement_lock:
+                        if 'OptionStopLoss' in placed:
+                            continue
+                        placed.add('OptionStopLoss')
+                    logging.info("Option entry %s filled; stock stop loss already filled (orderId=%s) -> placing option exit now", option_entry_order_id, oid)
+                    asyncio.ensure_future(
+                        placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
+                    )
     except Exception as e:
         logging.error("Error in handleOptionEntryFill: %s", e)
         logging.error(traceback.format_exc())
@@ -1085,6 +1176,12 @@ def triggerOptionOrderOnStockFill(connection, stock_order_id, ord_type, bar_type
         if not entry_data:
             return
         
+        # When option is triggered by price level only, do not place option exit from stock fill;
+        # the price-level monitor handles option exit (avoids duplicate option sell orders).
+        if entry_data.get('option_trigger_by_price_level'):
+            logging.debug("triggerOptionOrderOnStockFill: Option triggers by price level for entry %s, skipping option exit from stock fill", entry_order_id)
+            return
+        
         # Get option entry order ID
         option_orders = entry_data.get('option_orders', {})
         option_entry_order_id = option_orders.get('entry')
@@ -1097,16 +1194,20 @@ def triggerOptionOrderOnStockFill(connection, stock_order_id, ord_type, bar_type
         if not option_entry_data:
             return
         
-        # Get the appropriate parameters based on ord_type
-        # IMPORTANT: This function is ONLY called when stock TP/SL orders actually FILL
-        # Option exit orders are placed as immediate market orders (not conditional on stock price)
+        # Get the appropriate parameters based on ord_type.
+        # Use lock so only one of triggerOptionOrderOnStockFill vs handleOptionEntryFill places the exit when events are processed concurrently.
+        placed = option_entry_data.setdefault('option_exits_placed', set())
         if ord_type == 'StopLoss':
             sl_params = option_entry_data.get('option_sl_params')
             if not sl_params:
                 logging.warning("Stock stop loss filled (orderId=%s) but option_sl_params not found for option entry %s", 
                               stock_order_id, option_entry_order_id)
                 return
-            logging.info("Stock stop loss ORDER FILLED (orderId=%s) -> Placing IMMEDIATE option exit order (SELL call/put)", stock_order_id)
+            with _option_exit_placement_lock:
+                if 'OptionStopLoss' in placed:
+                    return
+                placed.add('OptionStopLoss')
+            logging.info("Stock SL filled (orderId=%s) -> placing option exit", stock_order_id)
             asyncio.ensure_future(
                 placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, sl_params, 'OptionStopLoss')
             )
@@ -1116,6 +1217,10 @@ def triggerOptionOrderOnStockFill(connection, stock_order_id, ord_type, bar_type
                 logging.warning("Stock take profit filled (orderId=%s) but option_tp_params not found for option entry %s", 
                               stock_order_id, option_entry_order_id)
                 return
+            with _option_exit_placement_lock:
+                if 'OptionProfit' in placed:
+                    return
+                placed.add('OptionProfit')
             logging.info("Stock take profit ORDER FILLED (orderId=%s) -> Placing IMMEDIATE option exit order (SELL call/put)", stock_order_id)
             asyncio.ensure_future(
                 placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, tp_params, 'OptionProfit')
@@ -1159,7 +1264,7 @@ def handleOptionTpSlFill(connection, option_order_id, ord_type):
                         break
             if pair_trade:
                 connection.cancelTrade(pair_trade.order)
-                logging.info("Option %s filled (orderId=%s), cancelled bracket pair order %s", ord_type, option_order_id, pair_id)
+                logging.debug("Option %s filled (orderId=%s), cancelled bracket pair order %s", ord_type, option_order_id, pair_id)
     except Exception as e:
         logging.error("Error in handleOptionTpSlFill: %s", e)
         logging.error(traceback.format_exc())
@@ -1170,7 +1275,7 @@ async def monitorOptionEntryBeforeStockFill(connection, stock_entry_order_id, sy
     This is similar to RBB logic - we monitor and update, but don't place the option order until stock entry fills.
     """
     try:
-        logging.info("monitorOptionEntryBeforeStockFill: Starting monitoring for stock_entry_order_id=%s, symbol=%s", 
+        logging.debug("monitorOptionEntryBeforeStockFill: Starting monitoring for stock_entry_order_id=%s, symbol=%s", 
                     stock_entry_order_id, symbol)
         
         # Get stock contract
@@ -1190,7 +1295,7 @@ async def monitorOptionEntryBeforeStockFill(connection, stock_entry_order_id, sy
                 if stock_entry_order_id not in Config.orderStatusData:
                     Config.orderStatusData[stock_entry_order_id] = {}
                 Config.orderStatusData[stock_entry_order_id]['option_entry_price'] = initial_entry_price
-                logging.info("monitorOptionEntryBeforeStockFill: Initial entry price set to %.2f for stock_order=%s", 
+                logging.debug("monitorOptionEntryBeforeStockFill: Initial entry price set to %.2f for stock_order=%s", 
                             initial_entry_price, stock_entry_order_id)
         
         while True:
@@ -1200,19 +1305,19 @@ async def monitorOptionEntryBeforeStockFill(connection, stock_entry_order_id, sy
                 # Check if stock entry order still exists and is not filled
                 entry_data = Config.orderStatusData.get(stock_entry_order_id)
                 if not entry_data:
-                    logging.info("monitorOptionEntryBeforeStockFill: Stock entry order %s not found, stopping monitoring", 
+                    logging.debug("monitorOptionEntryBeforeStockFill: Stock entry order %s not found, stopping monitoring", 
                                 stock_entry_order_id)
                     break
                 
-                # If stock entry is filled, stop monitoring (option entry is by price level only)
+                # If stock entry is filled, option was placed by fill handler (same condition as stock); stop monitoring
                 if entry_data.get('status') == 'Filled':
-                    logging.info("monitorOptionEntryBeforeStockFill: Stock entry order %s is FILLED, stopping monitoring", 
+                    logging.debug("monitorOptionEntryBeforeStockFill: Stock entry order %s is FILLED, stopping monitoring", 
                                 stock_entry_order_id)
                     break
                 
                 # If stock entry is cancelled/inactive, stop monitoring
                 if entry_data.get('status') in ['Cancelled', 'Inactive']:
-                    logging.info("monitorOptionEntryBeforeStockFill: Stock entry order %s is %s, stopping monitoring", 
+                    logging.debug("monitorOptionEntryBeforeStockFill: Stock entry order %s is %s, stopping monitoring", 
                                 stock_entry_order_id, entry_data.get('status'))
                     break
                 
@@ -1243,7 +1348,7 @@ async def monitorOptionEntryBeforeStockFill(connection, stock_entry_order_id, sy
                     if stock_entry_order_id not in Config.orderStatusData:
                         Config.orderStatusData[stock_entry_order_id] = {}
                     Config.orderStatusData[stock_entry_order_id]['option_entry_price'] = current_entry_price
-                    logging.info("monitorOptionEntryBeforeStockFill: Updated option entry price to %.2f for stock_order=%s (current_stock_price=%.2f)", 
+                    logging.debug("monitorOptionEntryBeforeStockFill: Updated option entry price to %.2f for stock_order=%s (current_stock_price=%.2f)", 
                                 current_entry_price, stock_entry_order_id, current_stock_price)
                 
             except Exception as e:
@@ -1261,7 +1366,7 @@ def updateOptionOrdersForRBB(connection, stock_entry_order_id, new_entry_price, 
         # For RBB, we update the stored entry price so monitorOptionEntryBeforeStockFill can use it
         if stock_entry_order_id in Config.orderStatusData:
             Config.orderStatusData[stock_entry_order_id]['option_entry_price'] = new_entry_price
-            logging.info("updateOptionOrdersForRBB: Updated option entry price to %.2f for stock_order=%s", 
+            logging.debug("updateOptionOrdersForRBB: Updated option entry price to %.2f for stock_order=%s", 
                         new_entry_price, stock_entry_order_id)
     except Exception as e:
         logging.error("Error in updateOptionOrdersForRBB: %s", e)
@@ -1305,7 +1410,7 @@ async def monitorAndPlacePendingOptionEntry(connection, pending_key, entry_price
                     if trigger_method == 1:  # Crosses above (BUY)
                         if current_stock_price < entry_price:
                             price_moved_away = True
-                            logging.info("monitorAndPlacePendingOptionEntry: Price moved below entry (%.2f < %.2f), waiting for crossing", 
+                            logging.debug("monitorAndPlacePendingOptionEntry: Price moved below entry (%.2f < %.2f), waiting for crossing", 
                                         current_stock_price, entry_price)
                     else:  # Breaks below (SELL)
                         if current_stock_price > entry_price:
@@ -1341,7 +1446,7 @@ async def monitorAndPlacePendingOptionEntry(connection, pending_key, entry_price
                             condition_met = True
                     
                     if condition_met:
-                        logging.info("monitorAndPlacePendingOptionEntry: Entry condition met (price=%.2f, entry=%.2f), placing option entry order", 
+                        logging.debug("monitorAndPlacePendingOptionEntry: Entry condition met (price=%.2f, entry=%.2f), placing option entry order", 
                                     current_stock_price, entry_price)
                         # Place the option entry order now
                         await placeOptionEntryOrderFromPending(connection, pending_key, entry_price, trigger_method)
@@ -1429,7 +1534,7 @@ async def placeOptionEntryOrderFromPending(connection, pending_key, entry_price,
             return
         
         option_entry_order_id = trade.order.orderId
-        logging.info("Option entry order placed from pending (conditional): If %s %s %.2f, then %s %d contracts (%s), orderId=%s",
+        logging.debug("Option entry order placed from pending (conditional): If %s %s %.2f, then %s %d contracts (%s), orderId=%s",
                     symbol, "crosses above" if trigger_method == 1 else "breaks below", entry_price,
                     action, option_quantity, entry_order_type, option_entry_order_id)
         
@@ -1465,7 +1570,7 @@ async def placeOptionEntryOrderFromPending(connection, pending_key, entry_price,
             'trigger_method': 1 if buy_sell_type == 'BUY' else 2  # Crosses above for BUY, breaks below for SELL
         }
         
-        logging.info("Option entry order placed and stored from pending: orderId=%s, stock_entry_order_id=%s", 
+        logging.debug("Option entry order placed and stored from pending: orderId=%s, stock_entry_order_id=%s", 
                     option_entry_order_id, stock_entry_order_id)
     except Exception as e:
         logging.error("Error in placeOptionEntryOrderFromPending: %s", e)
@@ -1535,7 +1640,7 @@ async def monitorAndAdjustBidAskOrder(connection, trade, order_type, initial_pri
                         condition_met = current_stock_price <= condition_price
                 
                 if not condition_met:
-                    logging.info("Option order %s: Stock condition not yet met (price=%.2f, condition=%.2f, method=%s). Waiting...", 
+                    logging.debug("Option order %s: Stock condition not yet met (price=%.2f, condition=%.2f, method=%s). Waiting...", 
                                order_id, current_stock_price or 0, condition_price, trigger_method)
                     # Wait and check again in 1 second
                     await asyncio.sleep(1)
@@ -1555,7 +1660,7 @@ async def monitorAndAdjustBidAskOrder(connection, trade, order_type, initial_pri
                             condition_met = current_stock_price <= condition_price
                     
                     if not condition_met:
-                        logging.info("Option order %s: Stock condition still not met. Will monitor order status instead.", order_id)
+                        logging.debug("Option order %s: Stock condition still not met. Will monitor order status instead.", order_id)
             except Exception as e:
                 logging.warning("Could not check stock condition for order %s: %s. Proceeding with price adjustments.", order_id, e)
         
@@ -1574,7 +1679,7 @@ async def monitorAndAdjustBidAskOrder(connection, trade, order_type, initial_pri
                     order_status = Config.orderStatusData[order_id].get('status')
                 
                 if order_status in ('Filled', 'Cancelled'):
-                    logging.info("Option order %s status is %s. Stopping price adjustments.", order_id, order_status)
+                    logging.debug("Option order %s status is %s. Stopping price adjustments.", order_id, order_status)
                     break
                 
                 if order_status not in ('PreSubmitted', 'Submitted', 'PendingSubmit', 'PendingCancel'):
@@ -1583,14 +1688,14 @@ async def monitorAndAdjustBidAskOrder(connection, trade, order_type, initial_pri
                 
                 if order_type == 'Bid+':
                     new_price = round(current_price + BID_ASK_ADJUST_INCREMENT, 2)
-                    logging.info("Bid+ order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
+                    logging.debug("Bid+ order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
                                order_id, current_price, new_price, adjustment_count + 1, BID_ASK_MAX_ADJUSTMENTS)
                 elif order_type == 'Ask-':
                     new_price = round(max(current_price - BID_ASK_ADJUST_INCREMENT, MIN_OPTION_LIMIT_PRICE), 2)
                     if new_price <= MIN_OPTION_LIMIT_PRICE and current_price <= MIN_OPTION_LIMIT_PRICE:
                         logging.warning("Ask- order %s: Already at minimum %.2f. Stopping.", order_id, MIN_OPTION_LIMIT_PRICE)
                         break
-                    logging.info("Ask- order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
+                    logging.debug("Ask- order %s not filled at %.2f, adjusting to %.2f (adjustment %d/%d)", 
                                order_id, current_price, new_price, adjustment_count + 1, BID_ASK_MAX_ADJUSTMENTS)
                 else:
                     logging.error("Unknown order type for adjustment: %s", order_type)
@@ -1601,7 +1706,7 @@ async def monitorAndAdjustBidAskOrder(connection, trade, order_type, initial_pri
                     connection.ib.placeOrder(trade.contract, trade.order)
                     current_price = new_price
                     adjustment_count += 1
-                    logging.info("Option order %s price adjusted to %.2f", order_id, new_price)
+                    logging.debug("Option order %s price adjusted to %.2f", order_id, new_price)
                 except Exception as e:
                     logging.error("Error modifying order %s price: %s", order_id, e)
                     break
@@ -1673,7 +1778,7 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
         # Note: condition_price is stored for reference only (from stock TP/SL order)
         # Option exit orders are placed IMMEDIATELY as market orders when stock TP/SL orders fill
         # They are NOT conditional orders based on stock price
-        logging.info("Option %s: Stock %s order filled, placing immediate option exit order (stock TP/SL price was %.2f, current_price=%.2f)", 
+        logging.debug("Option %s: Stock %s order filled, placing immediate option exit order (stock TP/SL price was %.2f, current_price=%.2f)", 
                     ord_type_name, ord_type_name.replace('Option', ''), condition_price, current_stock_price)
         
         # Create and place the conditional order (using OptionStopLoss or OptionProfit trade type)
@@ -1725,10 +1830,7 @@ async def placeOptionStopLossOrTakeProfit(connection, option_entry_order_id, par
             if trade:
                 initial_limit_price = order.lmtPrice if order.orderType == 'LMT' else None
                 
-                logging.info(
-                    "Option %s order placed immediately (stock %s filled): %s %d contracts (%s), orderId=%s",
-                    ord_type_name, ord_type_name.replace('Option', ''), action, quantity, order_type, order_id
-                )
+                logging.info("Option %s placed: %s %d contract(s), orderId=%s", ord_type_name, action, quantity, order_id)
                 
                 # Store order data
                 order_id = trade.order.orderId

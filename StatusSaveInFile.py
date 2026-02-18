@@ -8,12 +8,12 @@ import time as time
 cacheFile = "Cache.npy"
 settingFile = "Settings.npy"
 def StatusSaveInFile():
-    logging.info("Cache saving start")
+    logging.debug("Cache saving start")
     np.save(cacheFile, Config.orderStatusData)
-    logging.info("Cache successfully save")
+    logging.debug("Cache successfully save")
     np.save(settingFile, Config.defaultValue)
-    logging.info("Default Setting successfully save")
-    logging.info("Cache snapshot stored with %s records", len(Config.orderStatusData))
+    logging.debug("Default Setting successfully save")
+    logging.debug("Cache snapshot stored with %s records", len(Config.orderStatusData))
 
 def loadCache(connection):
     logging.info("Cache loading start")
@@ -27,9 +27,9 @@ def loadCache(connection):
                     if path.exists(cacheFile):
                         try:
                             Config.orderStatusData = np.load(cacheFile, allow_pickle='TRUE').item()
-                            logging.info("Cache successfully load")
+                            logging.debug("Cache successfully load")
                             _prune_cached_orders()
-                            logging.info("Cache restored with %s active records after pruning", len(Config.orderStatusData))
+                            logging.debug("Cache restored with %s active records after pruning", len(Config.orderStatusData))
                         except Exception as e:
                             logging.warning(f"Could not load cache file: {e}")
                             print(f"Warning: Could not load previous trades cache: {e}")
@@ -38,7 +38,7 @@ def loadCache(connection):
         if path.exists(settingFile):
             try:
                 Config.defaultValue =  np.load(settingFile, allow_pickle='TRUE').item()
-                logging.info("Default Setting successfully load")
+                logging.debug("Default Setting successfully load")
             except Exception as e:
                 logging.warning(f"Could not load settings file: {e}")
                 print(f"Warning: Could not load previous settings: {e}")
