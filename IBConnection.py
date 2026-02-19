@@ -432,8 +432,8 @@ class connection:
                 Config.orderStatusData[trade.order.orderId] = data
                 logging.debug("orderStatusEvent: Calling sendTpAndSl for orderId=%s, barType=%s, ordType=%s", trade.order.orderId, bar_type, ord_type)
                 sendTpAndSl(self, data)
-                # Option entry at same time as stock fill (not tied to TP/SL). sendTpAndSl may have
-                # added option_params to data; option module computes SL/TP from entry_data histData if needed.
+                # Option entry in parallel: place immediately when stock entry fills (option module computes
+                # PBe1/PBe2 TP/SL itself when needed so it does not wait for sendTpSlSell).
                 try:
                     from OptionTrading import on_stock_entry_fill
                     on_stock_entry_fill(self, trade.order.orderId)
@@ -463,6 +463,25 @@ class connection:
                     on_stock_entry_fill(self, trade.order.orderId)
                 except Exception as opt_e:
                     logging.warning("orderStatusEvent: Option on_stock_entry_fill failed for orderId=%s: %s", trade.order.orderId, opt_e)
+
+        else:
+            # Filled stock SL/TP not in orderStatusData (e.g. bracket child never had StatusUpdate)
+            # Resolve entry from parentId and trigger option exit so Conditional Order option SL/TP still run
+            if trade.orderStatus.status == 'Filled':
+                parent_id = getattr(trade.order, 'parentId', None)
+                if parent_id:
+                    entry_data = Config.orderStatusData.get(int(parent_id))
+                    if entry_data and entry_data.get('option_orders'):
+                        inferred_ord_type = 'StopLoss' if getattr(trade.order, 'orderType', None) == 'STP' else 'TakeProfit'
+                        Config.orderStatusData[trade.order.orderId] = {
+                            'status': 'Filled', 'ordType': inferred_ord_type, 'parentId': int(parent_id),
+                            'entryData': entry_data, 'barType': entry_data.get('barType'),
+                        }
+                        try:
+                            from OptionTrading import triggerOptionOrderOnStockFill
+                            triggerOptionOrderOnStockFill(self, trade.order.orderId, inferred_ord_type, entry_data.get('barType', ''))
+                        except Exception as e:
+                            logging.error("Error in triggerOptionOrderOnStockFill (fallback for bracket child): %s", e)
 
     # tws connection establish
     def connect(self):

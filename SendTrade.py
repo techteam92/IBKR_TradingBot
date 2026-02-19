@@ -15,6 +15,8 @@ import numpy as np
 import nest_asyncio
 def getContract(symbol,currency):
     try:
+        if symbol is not None and isinstance(symbol, str):
+            symbol = symbol.strip()
         logging.debug("creating contract for %s symbole is %s and currency is %s",Config.ibContract,symbol,currency)
         if (Config.ibContract == "Forex"):
             if currency == None:
@@ -1637,6 +1639,12 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
             StatusUpdate(entry_response, 'Entry', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                          breakEven, outsideRth)
+            # Store entry/tp/sl on entry order so option module (handleOptionTradingForEntryFill) uses same levels
+            entry_order_id = int(entry_response.order.orderId)
+            if entry_order_id in Config.orderStatusData:
+                Config.orderStatusData[entry_order_id]['entry_price'] = entry_price
+                Config.orderStatusData[entry_order_id]['tp_price'] = tp_price
+                Config.orderStatusData[entry_order_id]['stop_loss_price'] = stop_loss_price
             tp_response = connection.placeTrade(contract=contract, order=tp_order, outsideRth=outsideRth, trade_type='TakeProfit')
             StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, entry_price, symbol,
                          timeFrame, profit, stopLoss, risk, Config.orderStatusData.get(int(entry_response.order.orderId)), tif, barType, buySellType, atrPercentage, slValue,
@@ -6241,15 +6249,6 @@ def sendTpAndSl(connection, entryData):
                 nest_asyncio.apply()
                 loop = asyncio.get_event_loop()
                 
-                def task_done_callback(task):
-                    try:
-                        if task.exception():
-                            logging.error("TP/SL async task failed with exception: %s", task.exception())
-                            logging.error("Traceback: %s", traceback.format_exc())
-                            return
-                    except Exception as e:
-                        logging.error("Error in task_done_callback: %s", e)
-                
                 # Check if option trading is enabled for this trade
                 symbol = entryData.get('usersymbol', '')
                 timeFrame = entryData.get('timeFrame', '')
@@ -6272,6 +6271,14 @@ def sendTpAndSl(connection, entryData):
                 if option_params:
                     entryData['option_params'] = option_params
                     logging.debug("Stored option_params in entryData for %s", symbol)
+                
+                def task_done_callback(task):
+                    try:
+                        if task.exception():
+                            logging.error("TP/SL async task failed with exception: %s", task.exception())
+                            logging.error("Traceback: %s", traceback.format_exc())
+                    except Exception as e:
+                        logging.error("Error in task_done_callback: %s", e)
                 
                 if (entryData['action'] == "BUY"):
                     logging.debug("sendTpAndSl: scheduling sendTpSlSell for orderId=%s", entryData.get('orderId'))
@@ -6312,11 +6319,11 @@ def sendTpAndSl(connection, entryData):
             if not parentData:
                 logging.error("sendTpAndSl: parentData is empty or None, cannot trigger PBe2")
             
-            # Replay: one cycle only when Stop Loss fills (not when Take Profit fills). Re-enter once; re-entered trade has replay off.
+            # Replay: when Stop Loss fills (not Take Profit), re-enter. Re-entered trade keeps replay ON so its SL fill can trigger again.
             replay_enabled = parentData.get('replayEnabled', False) if parentData else False
             if entryData['ordType'] == "StopLoss" and replay_enabled:
-                logging.info("Replay (one cycle): StopLoss triggered, re-entering trade once for %s", parentData.get('usersymbol'))
-                # Re-enter the same trade with same parameters. Do NOT set replay for this order so it does not cycle again.
+                logging.info("Replay: StopLoss triggered, re-entering trade for %s", parentData.get('usersymbol'))
+                # Re-enter the same trade with same parameters. Set replay ON for re-entry so when its SL fills we re-enter again.
                 try:
                     # Get current session for outsideRth
                     from NewTradeFrame import _get_current_session
@@ -6336,7 +6343,11 @@ def sendTpAndSl(connection, entryData):
                     option_tp_order_type = opt.get('tp_order_type', 'Market')
                     option_risk_amount = opt.get('risk_amount', '')
                     if option_enabled:
-                        logging.info("Replay (one cycle): Passing option params to re-entry for %s: contract=%s, expire=%s", parentData.get('usersymbol'), option_contract, option_expire)
+                        logging.info("Replay: Passing option params to re-entry for %s: contract=%s, expire=%s", parentData.get('usersymbol'), option_contract, option_expire)
+                    # Store replay=True for re-entry so StatusUpdate sets replayEnabled on the new order; then when that order's SL fills we re-enter again.
+                    replay_key = (parentData.get('usersymbol', ''), parentData.get('timeFrame', ''), parentData.get('barType', ''), parentData.get('userBuySell', ''), datetime.datetime.now().timestamp())
+                    Config.order_replay_pending[replay_key] = True
+                    logging.info("Replay: Stored replay state for re-entry trade: key=%s, replay=True", replay_key)
                     asyncio.ensure_future(SendTrade(
                         connection,
                         parentData['usersymbol'],
@@ -6362,7 +6373,7 @@ def sendTpAndSl(connection, entryData):
                         option_tp_order_type=option_tp_order_type,
                         option_risk_amount=option_risk_amount,
                     ))
-                    logging.info("Replay (one cycle): Re-entry order placed for %s; replay off for this trade", parentData.get('usersymbol'))
+                    logging.info("Replay: Re-entry order placed for %s; replay on so next SL fill will re-enter again", parentData.get('usersymbol'))
                 except Exception as replay_error:
                     logging.error("Error in replay re-entry: %s", replay_error)
                     logging.error("Traceback: %s", traceback.format_exc())
@@ -8762,6 +8773,17 @@ async def sendTpSlSell(connection, entryData):
                     bar_type_name = "PBe1" if entryData['barType'] == Config.entryTradeType[6] else "PBe2"
                     logging.info(f"{bar_type_name} TP calculation: entry_stop_price={entry_stop_price} (entry price), stop_size={pbe_stop_size}, multiplier={multiplier}, tp={price}")
                     
+                    # Store TP and entry level on entry order so option module (handleOptionTradingForEntryFill / monitorUnderlyingAndPlaceOptionOrders) stays in sync
+                    entryData['tp_price'] = price
+                    entryData['profit_price'] = price
+                    eid = entryData.get('orderId')
+                    if eid is not None:
+                        if eid not in Config.orderStatusData:
+                            Config.orderStatusData[eid] = {}
+                        Config.orderStatusData[eid]['tp_price'] = price
+                        Config.orderStatusData[eid]['profit_price'] = price
+                        Config.orderStatusData[eid]['entry_price'] = float(entry_stop_price)
+                    
                     # Send TP order directly for PBe1/PBe2 - don't fall through to duplicate send
                     if entryData.get('action') == 'BUY':  # LONG position
                         tp_action = "SELL"  # To close long
@@ -9181,6 +9203,15 @@ async def sendTpSlSell(connection, entryData):
                         stpPrice = round(stop_loss_price, Config.roundVal)
                         entryData['calculated_stop_size'] = stop_size
                         logging.info(f"{bar_type_name} Extended hours stop loss (recalculated) in sendTpSlSell: LOD={lod}, HOD={hod}, stop_loss_price={stop_loss_price}, stop_size={stop_size}, stpPrice={stpPrice}")
+                # Store SL on entry order so option module stays in sync with stock
+                entryData['stop_loss_price'] = stpPrice
+                entryData['stopLossPrice'] = stpPrice
+                eid = entryData.get('orderId')
+                if eid is not None:
+                    if eid not in Config.orderStatusData:
+                        Config.orderStatusData[eid] = {}
+                    Config.orderStatusData[eid]['stop_loss_price'] = stpPrice
+                    Config.orderStatusData[eid]['stopLossPrice'] = stpPrice
             elif (entryData['barType'] == Config.entryTradeType[1] or entryData['barType'] == Config.entryTradeType[2] or entryData['barType'] == Config.entryTradeType[4] or entryData['barType'] == Config.entryTradeType[5] or 
                 entryData['barType'] == Config.entryTradeType[6] or entryData['barType'] == Config.entryTradeType[7] or entryData['barType'] == Config.entryTradeType[8] or
                 entryData['barType'] == Config.entryTradeType[9] or entryData['barType'] == Config.entryTradeType[10]):
@@ -10148,6 +10179,18 @@ async def conditional_order(connection, symbol, timeFrame, profit, stopLoss, ris
                     tp_price,
                     order_state['stop_order_type'],
                 )
+                # Store TP/SL orders in orderStatusData so option exit can run when stock SL/TP fills
+                # (triggerOptionOrderOnStockFill looks up SL/TP by orderId and needs entryData/parentId)
+                if not is_extended:
+                    entry_data = Config.orderStatusData.get(entry_id_key)
+                    if entry_data:
+                        StatusUpdate(tp_response, 'TakeProfit', contract, 'LMT', buySellType, qty, histData, tp_price, symbol,
+                                     timeFrame, profit, stopLoss, risk, entry_data, tif, barType, buySellType, atrPercentage, slValue,
+                                     breakEven, outsideRth, False, entry_points)
+                        StatusUpdate(sl_response, 'StopLoss', contract, 'STP', buySellType, qty, histData, stop_loss_price, symbol,
+                                     timeFrame, profit, stopLoss, risk, entry_data, tif, barType, buySellType, atrPercentage, slValue,
+                                     breakEven, outsideRth, False, entry_points)
+                        logging.info("Conditional Order: Stored TP/SL in orderStatusData for option exit on stock fill")
             
             logging.info("Conditional Order entry task done %s", symbol)
             break
