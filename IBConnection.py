@@ -106,15 +106,17 @@ class connection:
                 rb_index = 4
                 rbb_index = 5
                 pbe1_index = 6
+                pbe2_index = 7
                 # Exclude FB, Conditional Order, and RB in regular hours (they use bracket orders)
                 # Conditional Order uses bracket orders in RTH (like Custom entry), but needs sendTpAndSl in extended hours
-                # RBB and PBe1 place only entry order in RTH, TP/SL sent after fill (like RBB)
+                # RBB, PBe1, and PBe2 place only entry order in RTH; TP/SL and option (if enabled) sent after fill
                 # In extended hours, RB and RBB still need sendTpAndSl (don't use bracket orders)
                 is_conditional_order = bar_type == Config.entryTradeType[conditional_order_index] if len(Config.entryTradeType) > conditional_order_index else False
                 is_fb = bar_type == Config.entryTradeType[fb_index]
                 is_rb = bar_type == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
                 is_rbb = bar_type == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
                 is_pbe1 = bar_type == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
+                is_pbe2 = bar_type == Config.entryTradeType[pbe2_index] if len(Config.entryTradeType) > pbe2_index else False
                 if is_conditional_order:
                     should_send_tp_sl = is_extended_hours  # Conditional Order uses bracket orders in RTH, separate orders in extended hours
                 elif is_fb:
@@ -124,7 +126,9 @@ class connection:
                 elif is_rbb:
                     should_send_tp_sl = True  # RBB places only entry order in RTH, TP/SL sent after fill
                 elif is_pbe1:
-                    should_send_tp_sl = True  # PBe1 places only entry order in RTH (like RBB), TP/SL sent after fill
+                    should_send_tp_sl = True  # PBe1 places only entry order in RTH (like RBB), TP/SL and option after fill
+                elif is_pbe2:
+                    should_send_tp_sl = True  # PBe2 same as PBe1: option entry only after stock entry fills (like PBe1+Replay, no PBe1 orders)
                 else:
                     # Check if this is LB, LB2, or LB3
                     lb_index = 8
@@ -1231,6 +1235,9 @@ class connection:
                     return {}
 
             configTime = configTime.time().replace(microsecond=0)
+            trading_time = datetime.datetime.strptime(str(datetime.datetime.now().date()) + " " + Config.tradingTime, "%Y-%m-%d %H:%M:%S").time()
+            is_premarket = datetime.datetime.now().time() < trading_time
+
             for data in histData:
                 chart_date = data.date.date()
 
@@ -1241,10 +1248,22 @@ class connection:
                 if (datetime.datetime.now().date() == chart_date) and (data.date.time() >= configTime):
                     if(oldRow != None and (oldRow.date.time() == configTime)):
                         logging.debug("we are adding this row in historical %s   {For %s contract }",oldRow,ibcontract)
-                        if (data.date.date() == datetime.datetime.now().date()) and (data.date.time() >= datetime.datetime.strptime( str(datetime.datetime.now().date()) + " " + Config.tradingTime,  "%Y-%m-%d %H:%M:%S").time()):
+                        # RTH: only return bar when next bar is at/after 09:30. Pre-market: return bar at configTime as soon as we have it (so TP/SL bar-by-bar works).
+                        if is_premarket:
+                            historical = {"close": oldRow.close, "open": oldRow.open, "high": oldRow.high, "low": oldRow.low,"dateTime":oldRow.date}
+                            break
+                        if (data.date.date() == datetime.datetime.now().date()) and (data.date.time() >= trading_time):
                             historical = {"close": oldRow.close, "open": oldRow.open, "high": oldRow.high, "low": oldRow.low,"dateTime":oldRow.date}
                             break
                 oldRow = data
+            # Pre-market fallback: if no bar was returned (e.g. requested bar is latest and no "next" bar yet), return bar at configTime from today if present
+            if not historical and is_premarket:
+                today = datetime.datetime.now().date()
+                for bar in histData:
+                    if bar.date.date() == today and bar.date.time().replace(microsecond=0) == configTime:
+                        historical = {"close": bar.close, "open": bar.open, "high": bar.high, "low": bar.low, "dateTime": bar.date}
+                        logging.debug("getHistoricalChartData: pre-market fallback, returning bar at configTime %s", configTime)
+                        break
             logging.debug("historical data found %s ",historical)
             return historical
         except Exception as e:

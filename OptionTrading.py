@@ -114,6 +114,83 @@ def _get_nearest_strike_and_expiration(ib, stock_contract, desired_strike, desir
         return None, None, None
 
 
+def _get_strike_and_expiration_otm_steps(ib, stock_contract, current_price, otm_steps, is_call, desired_expiration_yyyymmdd):
+    """
+    Resolve strike by number of strikes OTM (not dollars). So "OTM 2" = 2 strikes out.
+    Avoids wrong strike when chain has non-$1 increments (e.g. 2.5) where price+2 snapped to 1 strike.
+    Returns (strike_price, expiration_yyyymmdd, trading_class) or (None, None, None).
+    """
+    try:
+        chains = ib.reqSecDefOptParams(stock_contract.symbol, '', stock_contract.secType, stock_contract.conId)
+        if not chains:
+            return None, None, None
+        symbol_upper = (stock_contract.symbol or '').upper()
+        chain = None
+        for c in chains:
+            tc = getattr(c, 'tradingClass', None) or ''
+            if (tc.upper() == symbol_upper and getattr(c, 'exchange', None) == 'SMART'):
+                chain = c
+                break
+        if chain is None:
+            for c in chains:
+                tc = getattr(c, 'tradingClass', None) or ''
+                if tc.upper() == symbol_upper:
+                    chain = c
+                    break
+        if chain is None:
+            for c in chains:
+                if getattr(c, 'exchange', None) == 'SMART':
+                    chain = c
+                    break
+        if chain is None:
+            chain = chains[0]
+        expirations = getattr(chain, 'expirations', None) or []
+        strikes_raw = getattr(chain, 'strikes', None) or []
+        trading_class = getattr(chain, 'tradingClass', None)
+        if not strikes_raw:
+            return None, None, None
+        strikes = sorted(set(strikes_raw))
+        # ATM = strike closest to current price
+        atm_strike = min(strikes, key=lambda s: abs(s - current_price))
+        atm_index = strikes.index(atm_strike)
+        # Call: OTM = higher strikes (index + N). Put: OTM = lower strikes (index - N).
+        if is_call:
+            target_index = atm_index + otm_steps
+        else:
+            target_index = atm_index - otm_steps
+        target_index = max(0, min(len(strikes) - 1, target_index))
+        strike_price = strikes[target_index]
+        if desired_expiration_yyyymmdd in expirations:
+            expiration_date = desired_expiration_yyyymmdd
+        else:
+            def date_dist(exp_str):
+                try:
+                    return abs(int(exp_str) - int(desired_expiration_yyyymmdd))
+                except (ValueError, TypeError):
+                    return float('inf')
+            expiration_date = min(expirations, key=date_dist)
+        logging.debug("Option OTM by steps: current=%.2f otm_steps=%s is_call=%s -> strike=%s (atm_index=%s target_index=%s)",
+                     current_price, otm_steps, is_call, strike_price, atm_index, target_index)
+        return strike_price, expiration_date, trading_class
+    except Exception as e:
+        logging.error("_get_strike_and_expiration_otm_steps failed for %s: %s", stock_contract.symbol, e)
+        return None, None, None
+
+
+def _parse_otm_steps(option_contract_str):
+    """Parse OTM steps from contract string: 'OTM1'/'OTM 1' -> 1, 'OTM2'/'OTM 2' -> 2. Returns 1 if missing/invalid."""
+    if not option_contract_str or not str(option_contract_str).strip().upper().startswith("OTM"):
+        return None
+    s = str(option_contract_str).replace("OTM", "").replace("+", "").strip()
+    if not s:
+        return 1
+    try:
+        n = int(s)
+        return max(1, min(n, 10))
+    except ValueError:
+        return 1
+
+
 def _pre_resolve_option_contract(connection, symbol, entry_price, option_contract_str, option_expire, buy_sell_type):
     """
     Resolve option contract once using entry_price (e.g. stop trigger 684.77) so option is ATM at that level.
@@ -124,25 +201,26 @@ def _pre_resolve_option_contract(connection, symbol, entry_price, option_contrac
         stock_contract = Stock(symbol, 'SMART', 'USD')
         stock_contract = connection.ib.qualifyContracts(stock_contract)[0]
         option_right = 'C' if (buy_sell_type or 'BUY').upper() == 'BUY' else 'P'
+        is_call = (buy_sell_type or 'BUY').upper() == 'BUY'
         strike_price = None
-        if option_contract_str == "ATM":
-            strike_price = round(entry_price, 0)
-        elif option_contract_str and str(option_contract_str).strip().startswith("OTM"):
-            otm_steps = int(str(option_contract_str).replace("OTM", "").strip() or "1")
-            if (buy_sell_type or 'BUY').upper() == 'BUY':
-                strike_price = round(entry_price + (otm_steps * 1.0), 0)
-            else:
-                strike_price = round(entry_price - (otm_steps * 1.0), 0)
-        else:
-            return None, None
         expiry_weeks = int(option_expire) if option_expire else 0
         today = datetime.date.today()
         days_until_friday = (4 - today.weekday()) % 7
         target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
         expiration_date = target_date.strftime("%Y%m%d")
-        snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
-            connection.ib, stock_contract, strike_price, expiration_date
-        )
+        if option_contract_str == "ATM":
+            snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
+                connection.ib, stock_contract, round(entry_price, 0), expiration_date
+            )
+        elif option_contract_str and str(option_contract_str).strip().upper().startswith("OTM"):
+            otm_steps = _parse_otm_steps(option_contract_str)
+            if otm_steps is None:
+                return None, None
+            snapped_strike, snapped_expiration, trading_class = _get_strike_and_expiration_otm_steps(
+                connection.ib, stock_contract, entry_price, otm_steps, is_call, expiration_date
+            )
+        else:
+            return None, None
         if snapped_strike is None or snapped_expiration is None:
             return None, None
         option_contract = Option(symbol, snapped_expiration, snapped_strike, option_right, 'SMART')
@@ -195,9 +273,9 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
         if outside_rth or not _is_rth():
             logging.debug("Option trading only runs during RTH; skipping (outside_rth=%s)", outside_rth)
             return
-        logging.debug("placeOptionTradeAndStore: Starting for %s, contract=%s, expire=%s, entry=%s, sl=%s, tp=%s, risk=%s%s",
-                      symbol, option_contract_str, option_expire, entry_price, stop_loss_price, profit_price, risk_amount,
-                      " (pre-resolved)" if pre_resolved_contract else "")
+        logging.info("placeOptionTradeAndStore: symbol=%s, contract=%r, expire=%s, entry_price=%s%s",
+                     symbol, option_contract_str, option_expire, entry_price, " (pre-resolved)" if pre_resolved_contract else "")
+        logging.debug("placeOptionTradeAndStore: sl=%s, tp=%s, risk=%s", stop_loss_price, profit_price, risk_amount)
         
         # Get stock contract (needed for stock_exchange and possibly for non-pre-resolved path)
         stock_contract = Stock(symbol, 'SMART', 'USD')
@@ -235,38 +313,34 @@ async def placeOptionTradeAndStore(connection, symbol, option_contract_str, opti
                 logging.error("Could not get current stock price for %s", symbol)
                 return
             
-            # Resolve strike from dropdown (ATM/OTM)
-            strike_price = None
-            if option_contract_str == "ATM":
-                strike_price = round(current_stock_price, 0)  # Round to nearest dollar
-            elif option_contract_str.startswith("OTM"):
-                # OTM 1, OTM 2, OTM 3
-                otm_steps = int(option_contract_str.replace("OTM", "").strip())
-                if buy_sell_type == "BUY":
-                    # For BUY: OTM = above current price (call)
-                    strike_price = round(current_stock_price + (otm_steps * 1.0), 0)
-                else:
-                    # For SELL: OTM = below current price (put)
-                    strike_price = round(current_stock_price - (otm_steps * 1.0), 0)
-            else:
-                logging.error("Unknown option contract code: %s", option_contract_str)
-                return
-            
-            # Determine option right (Call for BUY, Put for SELL)
+            # Resolve strike from dropdown (ATM/OTM). OTM = by strike steps (OTM 2 = 2 strikes OTM), not dollars.
             option_right = 'C' if buy_sell_type == 'BUY' else 'P'
-            
-            # Resolve expiration date from weeks out
+            is_call = buy_sell_type == 'BUY'
             expiry_weeks = int(option_expire) if option_expire else 0
             today = datetime.date.today()
-            # Find this week's Friday (weekly options expire on Friday). 0 = current week = this Friday.
             days_until_friday = (4 - today.weekday()) % 7
             target_date = today + datetime.timedelta(days=days_until_friday + (expiry_weeks * 7))
             expiration_date = target_date.strftime("%Y%m%d")
-            
-            # Snap to nearest available strike and expiration from option chain (avoids "No security definition" errors)
-            snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
-                connection.ib, stock_contract, strike_price, expiration_date
-            )
+
+            if option_contract_str == "ATM":
+                strike_price = round(current_stock_price, 0)
+                snapped_strike, snapped_expiration, trading_class = _get_nearest_strike_and_expiration(
+                    connection.ib, stock_contract, strike_price, expiration_date
+                )
+            elif option_contract_str and str(option_contract_str).strip().upper().startswith("OTM"):
+                otm_steps = _parse_otm_steps(option_contract_str)
+                if otm_steps is None:
+                    logging.error("Could not parse OTM steps from: %s", option_contract_str)
+                    return
+                snapped_strike, snapped_expiration, trading_class = _get_strike_and_expiration_otm_steps(
+                    connection.ib, stock_contract, current_stock_price, otm_steps, is_call, expiration_date
+                )
+                logging.info("Option strike resolution: contract=%r, parsed_otm_steps=%s, entry_price=%.2f, resolved_strike=%s (call=%s)",
+                             option_contract_str, otm_steps, current_stock_price, snapped_strike, is_call)
+            else:
+                logging.error("Unknown option contract code: %s", option_contract_str)
+                return
+
             if snapped_strike is None or snapped_expiration is None:
                 logging.error("Could not resolve option chain for %s; cannot place option order", symbol)
                 return
@@ -664,7 +738,9 @@ def on_stock_entry_fill(connection, stock_entry_order_id):
     Option logic is separate: we receive only order_id and read all numbers from Config
     (stock writes filledPrice, stop_loss_price, profit_price, etc. to Config.orderStatusData).
     Only place option entry when the stock entry order has status 'Filled' (prevents placing
-    option entry before stock fills, e.g. replay re-entry).
+    option entry before stock fills, e.g. replay re-entry, PBe2).
+    PBe2: same as PBe1 + Replay — no option orders for the simulated PBe1 leg; option entry
+    is placed only after the (real) stock entry fills.
     """
     try:
         entry_data = Config.orderStatusData.get(int(stock_entry_order_id), {})

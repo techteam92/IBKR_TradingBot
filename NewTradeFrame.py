@@ -500,8 +500,8 @@ def checkLastTradingTime():
         return False  # Trading is open
 
 def add():
-    print("new row adding.")
-    addField(0, "")
+    # ADD button no longer adds a row; new row is added when user clicks Execute
+    pass
 
 
 def _log_snapshot_for_row(row_index):
@@ -642,6 +642,9 @@ def execute_row(row_index):
     button.config(text="Cancel")
     button['command'] = lambda idx=row_index: cancel_row(idx)
     # Keep button enabled so user can cancel if needed
+
+    # Add a new row after Execute so user can enter next trade
+    addField(0, "")
 
 
 def toggle_replay(row_index):
@@ -919,12 +922,15 @@ def addOldCache():
             disableEntryState(row_idx)
             cancelButton[row_idx].config(text="Cancel")
             cancelButton[row_idx]['command'] = lambda idx=row_idx: cancel_row(idx)
-            # Initialize replay state for cached rows
+            # Replay state: use cached value if present, else keep default from addField
             if len(replayEnabled) <= row_idx:
                 replayEnabled.append(False)
-                # Create a dummy replay button for cached rows (won't be visible but prevents index errors)
                 if len(replayButtonList) <= row_idx:
                     replayButtonList.append(None)
+            if row_idx < len(replayEnabled) and value.get("replayEnabled") is not None:
+                replayEnabled[row_idx] = bool(value.get("replayEnabled"))
+                if row_idx < len(replayButtonList) and replayButtonList[row_idx] is not None:
+                    replayButtonList[row_idx].config(bg='#90EE90' if replayEnabled[row_idx] else '#D3D3D3')
 
 
 
@@ -1144,8 +1150,14 @@ def addField(rowYPosition, initial_status_text=""):
     row_index_for_replay = len(symbol) - 1
     replayButton = Button(field, width="10", height="1", text="Replay", bg='#D3D3D3')
     replayButton.grid(row=1, column=9, sticky="ew", padx=5, pady=3)
-    replayEnabled.append(False)  # Initialize replay as disabled
+    # Use default Replay from Setting (same as UI: when On, SL fill re-enters the trade)
+    default_replay = Config.defaultValue.get("replay", False)
+    if isinstance(default_replay, str):
+        default_replay = default_replay.lower() in ("true", "1", "yes", "on")
+    replayEnabled.append(bool(default_replay))
     replayButtonList.append(replayButton)  # Store button reference
+    if default_replay:
+        replayButton.config(bg='#90EE90')  # Light green when enabled
     replayButton['command'] = lambda idx=row_index_for_replay: toggle_replay(idx)
 
     # 11) BREAK EVEN (column 10)

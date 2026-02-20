@@ -3697,14 +3697,17 @@ async def lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
 async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth):
     """
-    PBe2 logic:
-    - Simulate PBe1 without placing any order:
+    PBe2 logic (same idea as PBe1 + Replay, but no orders for the first "PBe1" leg):
+    - Simulate PBe1 without placing any order (calculate only: entry fill then SL/TP hit):
       * Use buySellType directly (no condition checking) - same as PBe1
       * Calculate entry price and stop loss (same as PBe1)
-      * Monitor if price hits stop loss level (LOD for BUY, HOD for SELL)
-    - After PBe1 would have stopped out, replay PBe1:
+      * Monitor if price hits entry then stop loss level (LOD for BUY, HOD for SELL)
+    - When simulated PBe1 is "closed" (stopped out), trigger stock entry (replay):
       * Use same logic as PBe1 (sendEntryTrade, same entry/stop loss calculation)
-      * Place actual order and start pbe1_loop_run
+      * Place actual stock order and start pbe2_loop_run
+    - Option (when enabled): no option calculation or logic for the simulated PBe1 leg.
+      Option is only calculated/placed when the real stock entry fills (same as PBe1+Replay);
+      option params from Config.option_trade_params stored at SendTrade start.
     """
     logging.info("pull_back_PBe2 mkt trade is sending.")
     ibContract = getContract(symbol, None)
@@ -3811,6 +3814,7 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         logging.info("PBe2: Monitoring for PBe1 entry fill, then stop out (price must hit entry price first, then stop loss)")
         
         # Step 2: Monitor PBe1 simulation - first wait for entry fill, then wait for stop out
+        # Stock only here; no option calculation or logic for this simulated PBe1 leg.
         # CRITICAL: We need to wait for:
         # 1. PBe1 entry to be filled (price must hit entry price)
         # 2. THEN PBe1 to stop out (price must hit stop loss)
@@ -4175,11 +4179,12 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                 current_bar = recentBarData[len(recentBarData) - 1]
                 current_bar_high = float(current_bar.get('high', 0))
                 current_bar_low = float(current_bar.get('low', 0))
-                current_bar_datetime = current_bar.get('dateTime')
+                # Bar datetime: getHistoricalChartDataForEntry uses 'date'; support both like PBe1/RBB
+                current_bar_datetime = current_bar.get('dateTime') or current_bar.get('date')
                 
                 # Get original bar's datetime to check if new bar closed
                 original_histData = old_order.get('histData', {})
-                original_bar_datetime = original_histData.get('dateTime') if original_histData else None
+                original_bar_datetime = (original_histData.get('dateTime') or original_histData.get('date')) if original_histData else None
                 
                 # Check if a new bar has closed (different datetime) - similar to RBB
                 should_update_entry = False
@@ -4189,8 +4194,22 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                         should_update_entry = True
                         logging.info(f"PBe2: New bar closed (original={original_bar_datetime}, new={current_bar_datetime}), updating entry stop price")
                 else:
-                    # Can't compare datetimes, skip entry update but still check HOD/LOD
-                    logging.info(f"PBe2: Cannot compare bar datetimes, skipping entry update")
+                    # Can't compare datetimes: use price-based check like RBB HOD/LOD path
+                    logging.info(f"PBe2: Cannot compare bar datetimes (original=%s, current=%s), using price-based check", original_bar_datetime, current_bar_datetime)
+                    current_entry_stop = round(float(order.auxPrice), Config.roundVal) if order and order.auxPrice is not None else None
+                    if current_entry_stop is not None:
+                        if old_order['userBuySell'] == 'BUY':
+                            new_aux_price_check = round(current_bar_high + 0.01, Config.roundVal)
+                        else:
+                            new_aux_price_check = round(current_bar_low - 0.01, Config.roundVal)
+                        if not original_bar_datetime:
+                            # First iteration: update to current bar
+                            should_update_entry = True
+                            logging.info(f"PBe2: First iteration (no previous histData), updating entry to current bar")
+                        elif abs(new_aux_price_check - current_entry_stop) > 0.01:
+                            should_update_entry = True
+                            logging.info(f"PBe2: Entry price changed ({current_entry_stop} -> {new_aux_price_check}), updating")
+                    # else: keep should_update_entry False
                 
                 # Update entry stop price if new bar closed (like RBB)
                 if should_update_entry:
@@ -4288,12 +4307,15 @@ async def pbe2_loop_run(connection,key,entry_order,buySellType, lastPrice):
                 
                 # Continue with original PBe2 logic (pattern detection)
                 tradeType, row = pbe_result(buySellType, lastPrice, recentBarData, True)
-                if tradeType == "":
+                if tradeType == "" or row is None:
                     continue
-                if (row['date'] == Config.pbe1_saved.get(key)['date']):
+                saved = Config.pbe1_saved.get(key)
+                if saved is None:
+                    continue
+                if row.get('date') == saved.get('date'):
                     logging.info(
                         " in pbe2 first row and second row datetime is same so we will not execute new trade  [ %s ] old date [ %s ]",
-                        row['date'], Config.pbe1_saved.get(key)['date'])
+                        row.get('date'), saved.get('date'))
                     continue
                 else:
                     logging.info("pbe2 second condition found %s %s", tradeType, row)

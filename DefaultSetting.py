@@ -18,76 +18,83 @@ def DefaultSetting(connection):
     settingFrame.protocol("WM_DELETE_WINDOW", on_closing)
     settingFrame.geometry(
         "%dx%d+%d+%d" % (
-            300, 350, (settingFrame.winfo_screenwidth() / 2) - 500, (settingFrame.winfo_screenheight() / 2) - 300))
+            300, 410, (settingFrame.winfo_screenwidth() / 2) - 500, (settingFrame.winfo_screenheight() / 2) - 300))
     settingFrame.attributes('-topmost', True)
     content()
 
 def content():
-    # Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Symbol:- ", justify=LEFT).place(
-    #     x=20, y=20)
-    #
-    # firstEntry = Entry(settingFrame, width="13", textvariable=StringVar(settingFrame))
-    # firstEntry.place(x=150, y=21)
-    # setDefaultSymbol(firstEntry)
-    # data.update({"symbol":firstEntry})
-
-    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Time Frame:- ", justify=LEFT).place(
-        x=20, y=20)
-    secEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.timeFrame)
-    secEntry.place(x=150, y=21)
-    secEntry.current(0)
-    setDefaultTimeFrame(secEntry)
-    data.update({"timeFrame": secEntry})
-
-    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Profit:- ", justify=LEFT).place(
-        x=20, y=50)
-    profitEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.takeProfit)
-    profitEntry.place(x=150, y=52)
-    profitEntry.current(0)
-    setDefaultProfit(profitEntry)
-    data.update({"Profit": profitEntry})
+    # Order: Stop Loss, Trade Type, Buy/Sell, Risk, Profit, Time Frame, Time In Force, Replay, Break Even
 
     Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Stop Loss:- ", justify=LEFT).place(
-        x=20, y=80)
+        x=20, y=20)
     stpLossEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.stopLoss)
-    stpLossEntry.place(x=150, y=82)
+    stpLossEntry.place(x=150, y=21)
     stpLossEntry.current(0)
     setDefaultStp(stpLossEntry)
     data.update({"stopLoss": stpLossEntry})
 
-    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Time In Force:- ", justify=LEFT).place(
-        x=20, y=110)
-    tifEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.timeInForce)
-    tifEntry.place(x=150, y=112)
-    tifEntry.current(0)
-    setDefaultTif(tifEntry)
-    data.update({"tif": tifEntry})
-
-
     Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Entry Trade Type:- ", justify=LEFT).place(
-        x=20, y=140)
+        x=20, y=50)
     entryType = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.entryTradeType)
-    entryType.place(x=150, y=142)
+    entryType.place(x=150, y=52)
     entryType.current(0)
     setDefaultEntryType(entryType)
     data.update({"entryType": entryType})
 
-
     Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Buy/Sell:- ", justify=LEFT).place(
-        x=20, y=170)
+        x=20, y=80)
     buySellType = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.buySell)
-    buySellType.place(x=150, y=172)
+    buySellType.place(x=150, y=82)
     buySellType.current(0)
     setDefaultBuySell(buySellType)
     data.update({"buySellType": buySellType})
 
-
     Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Risk:- ", justify=LEFT).place(
-        x=20, y=200)
+        x=20, y=110)
     riskEntry = Entry(settingFrame, width="13", textvariable=StringVar(settingFrame))
-    riskEntry.place(x=150, y=202)
+    riskEntry.place(x=150, y=112)
     setDefaultRisk(riskEntry)
     data.update({"risk": riskEntry})
+
+    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Profit:- ", justify=LEFT).place(
+        x=20, y=140)
+    profitEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.takeProfit)
+    profitEntry.place(x=150, y=142)
+    profitEntry.current(0)
+    setDefaultProfit(profitEntry)
+    data.update({"Profit": profitEntry})
+
+    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Time Frame:- ", justify=LEFT).place(
+        x=20, y=170)
+    secEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.timeFrame)
+    secEntry.place(x=150, y=172)
+    secEntry.current(0)
+    setDefaultTimeFrame(secEntry)
+    data.update({"timeFrame": secEntry})
+
+    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Time In Force:- ", justify=LEFT).place(
+        x=20, y=200)
+    tifEntry = ttk.Combobox(settingFrame, state="readonly", width="10", value=Config.timeInForce)
+    tifEntry.place(x=150, y=202)
+    tifEntry.current(0)
+    setDefaultTif(tifEntry)
+    data.update({"tif": tifEntry})
+
+    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Replay:- ", justify=LEFT).place(
+        x=20, y=230)
+    replayEntry = ttk.Combobox(settingFrame, state="readonly", width="10", values=["Off", "On"])
+    replayEntry.place(x=150, y=232)
+    replayEntry.current(0)
+    setDefaultReplay(replayEntry)
+    data.update({"replay": replayEntry})
+
+    Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="Break Even:- ", justify=LEFT).place(
+        x=20, y=260)
+    breakEvenEntry = ttk.Combobox(settingFrame, state="readonly", width="10", values=["Off", "On"])
+    breakEvenEntry.place(x=150, y=262)
+    breakEvenEntry.current(0)
+    setDefaultBreakEven(breakEvenEntry)
+    data.update({"breakEven": breakEvenEntry})
 
     # ATR field disabled - functionality removed
     # Label(settingFrame, font=(Config.fontName2, Config.fontSize2), text="ATR:- ", justify=LEFT).place(
@@ -135,6 +142,12 @@ def updateSetting():
     Config.defaultValue.update({"entryType": data.get("entryType").get()})
     Config.defaultValue.update({"buySellType": data.get("buySellType").get()})
     Config.defaultValue.update({"atr": data.get("atr").get()})
+    # Replay: same as UI - when On, stop loss fill will re-enter the trade
+    replay_val = data.get("replay").get()
+    Config.defaultValue.update({"replay": replay_val == "On"})
+    # Break Even: store as "True"/"False" for compatibility with NewTradeFrame
+    break_even_val = data.get("breakEven").get()
+    Config.defaultValue.update({"breakEven": "True" if break_even_val == "On" else "False"})
 
     # Config.defaultValue.update({"rthType": data.get("rth").get()})
     # Config.defaultValue.update({"pnl": data.get("pnl").get()})
@@ -191,6 +204,26 @@ def setDefaultRth(rthType):
 def setDefaultBuySell(buySellType):
     if Config.defaultValue.get("buySellType") != None:
         buySellType.current(Config.buySell.index((Config.defaultValue.get("buySellType"))))
+
+def setDefaultReplay(replayCombo):
+    """Set Replay default from saved setting. Same as UI: On = re-enter trade when stop loss fills."""
+    val = Config.defaultValue.get("replay")
+    if val is None:
+        return
+    if isinstance(val, str):
+        val = val.lower() in ("true", "1", "yes", "on")
+    replayCombo.current(1 if val else 0)
+
+def setDefaultBreakEven(breakEvenCombo):
+    """Set Break Even default from saved setting. Stored as 'True'/'False' for NewTradeFrame."""
+    val = Config.defaultValue.get("breakEven")
+    if val is None:
+        return
+    if isinstance(val, str):
+        on = val.lower() in ("true", "1", "yes", "on")
+    else:
+        on = bool(val)
+    breakEvenCombo.current(1 if on else 0)
 
 def on_closing():
     settingFrame.destroy()
