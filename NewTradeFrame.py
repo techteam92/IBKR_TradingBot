@@ -467,17 +467,21 @@ def _log_ui_elements_displayed():
 
 
 def _get_current_session():
-    """Detect current trading session"""
-    now = datetime.datetime.now().time().replace(microsecond=0)
+    """Detect current US equity session (same logic as SendTrade) using US/Eastern."""
+    try:
+        from zoneinfo import ZoneInfo
+        now_et = datetime.datetime.now(ZoneInfo('US/Eastern')).time().replace(microsecond=0)
+    except Exception:
+        now_et = datetime.datetime.now().time().replace(microsecond=0)
     pre_start = datetime.time(4, 0, 0)
     rth_start = datetime.time(9, 30, 0)
     rth_end = datetime.time(16, 0, 0)
     after_end = datetime.time(20, 0, 0)
-    if rth_start <= now < rth_end:
+    if rth_start <= now_et < rth_end:
         return 'RTH'
-    if pre_start <= now < rth_start:
+    if pre_start <= now_et < rth_start:
         return 'PREMARKET'
-    if rth_end <= now < after_end:
+    if rth_end <= now_et < after_end:
         return 'AFTERHOURS'
     return 'OVERNIGHT'
 
@@ -500,8 +504,8 @@ def checkLastTradingTime():
         return False  # Trading is open
 
 def add():
-    # ADD button no longer adds a row; new row is added when user clicks Execute
-    pass
+    """Add a new trade row when user clicks ADD button."""
+    addField(0, "")
 
 
 def _log_snapshot_for_row(row_index):
@@ -546,16 +550,16 @@ def execute_row(row_index):
     logging.debug("Execute row %s detected session: %s, outsideRth: %s", row_index, session, outsideRth)
 
     current_tif = timeInForce[row_index].get()
+    # When in extended hours but user chose Day (or GTC), show warning; trade is still allowed
     if outsideRth and current_tif != 'OTH':
-        tkinter.messagebox.showerror(
-            'Error',
-            f"Orders outside trading hours (premarket/after-hours) require 'OTH' (Outside Trading Hours) in Time In Force.\n"
-            f"Current session: {session}\n"
-            f"Please select 'OTH' in Time In Force and try again.")
+        tkinter.messagebox.showwarning(
+            'Session / Time in Force',
+            f"Current session is {session} (extended hours).\n\n"
+            f"You selected Time in Force: {current_tif}.\n\n"
+            f"For extended hours trading, use 'OTH' (Outside Trading Hours).\n"
+            f"Proceeding with current selection. Order will use stop-limit for entry.")
         logging.warning(
-            f"Order rejected for row {row_index}: outsideRth={outsideRth}, session={session}, "
-            f"but Time In Force is '{current_tif}' instead of 'OTH'")
-        return
+            f"Row {row_index}: session={session}, Time in Force='{current_tif}' (consider OTH for extended hours); allowing trade.")
 
     _set_status(row_index, "Sent")
     _log_snapshot_for_row(row_index)
