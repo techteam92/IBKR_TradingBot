@@ -3699,10 +3699,10 @@ async def lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
 async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth):
     """
-    PBe2 logic (same idea as PBe1 + Replay, but no orders for the first "PBe1" leg):
+    PBe2 logic (aligned with real PBe1 — same bar and direction, no extra condition):
     - The PBe1 leg in PBe2 is for CALCULATION ONLY — no real PBe1 order is placed.
+    - Use same logic as real PBe1: buySellType directly (no pbe1_result pattern check; real PBe1 does not use it).
     - Simulate PBe1 without placing any order (calculate only: entry fill then SL/TP hit):
-      * Use buySellType directly (no condition checking) - same as PBe1
       * Calculate entry price and stop loss (same as PBe1)
       * Monitor if price hits entry then stop loss level (LOD for BUY, HOD for SELL)
       * Stop out is only recognized after at least one new bar has closed since "entry fill"
@@ -3732,18 +3732,18 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         histData = None
         tradeType = ""
         
-        # PBe2 logic:
-        # 1. Simulate PBe1 without placing order (use buySellType directly, calculate entry/stop loss)
-        # 2. Monitor if price hits stop loss level (LOD for BUY, HOD for SELL)
-        # 3. After PBe1 would have stopped out, replay PBe1 (place order using same logic as PBe1)
+        # PBe2 logic (aligned with real PBe1):
+        # 1. Use same bar and direction as real PBe1: buySellType directly, NO pbe1_result() condition (real PBe1 does not check pattern)
+        # 2. Simulate PBe1: entry fill then stop out (LOD for BUY, HOD for SELL)
+        # 3. When simulated PBe1 stops out, replay PBe1 (place real PBe2 order)
         
-        logging.info("PBe2: Starting PBe1 simulation (no order will be placed until after stop out)")
+        logging.info("PBe2: Starting PBe1 simulation (same bar + direction as real PBe1, no pattern condition)")
         
-        # Step 1: Check PBe1 condition first (simulate PBe1 without placing order)
+        # Step 1: Get bar data - same as real PBe1. Use buySellType directly (no pbe1_result check; real PBe1 does not use it)
         complete_bar_data = connection.pbe1_entry_historical_data(ibContract, timeFrame, chartTime)
-        logging.info("PBe2: RecentBar for PBe1 condition check %s", complete_bar_data)
+        logging.info("PBe2: RecentBar for PBe1 simulation %s", complete_bar_data)
         if(len(complete_bar_data) == 0):
-            logging.info("PBe2: last 1 record not found for PBe1 condition check, will try after 1 sec.")
+            logging.info("PBe2: last 1 record not found for PBe1 simulation, will try after 1 sec.")
             await asyncio.sleep(1)
             continue
         
@@ -3751,43 +3751,21 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         if len(complete_bar_data) >= 2:
             # Get the second-to-last bar (most recent closed bar) - same as PBe1
             last_candel = complete_bar_data[len(complete_bar_data)-2]
-            logging.info("PBe2: Using second-to-last bar (index=%s) as most recent closed bar for PBe1 condition check", len(complete_bar_data)-2)
+            logging.info("PBe2: Using second-to-last bar (index=%s) as most recent closed bar - same as real PBe1", len(complete_bar_data)-2)
         else:
             # Only one bar available, use it (might be the initial bar) - same as PBe1
             last_candel = complete_bar_data[len(complete_bar_data)-1]
-            logging.info("PBe2: Only one bar available, using it (index=0) for PBe1 condition check")
+            logging.info("PBe2: Only one bar available, using it (index=0) - same as real PBe1")
         
-        logging.info("PBe2: last candel found for PBe1 condition check %s ", last_candel)
+        logging.info("PBe2: last candel for PBe1 simulation %s ", last_candel)
         if (last_candel == None or len(last_candel) == 0):
-            logging.info("PBe2: Last Price Not Found for %s contract for PBe1 condition check", ibContract)
+            logging.info("PBe2: Last Price Not Found for %s contract", ibContract)
             await asyncio.sleep(1)
             continue
         
-        # PBe2: First check PBe1 condition (must wait until PBe1 condition is met)
-        # Use pbe1_result() to check if PBe1 condition is satisfied
-        pbe1_tradeType, pbe1_result_row = pbe1_result(last_candel, complete_bar_data)
-        logging.info("PBe2: Checking PBe1 condition using pbe1_result: tradeType=%s, result_row=%s", pbe1_tradeType, pbe1_result_row)
-        
-        # Wait until PBe1 condition is met (but don't place any order for PBe1)
-        if pbe1_tradeType == "" or pbe1_tradeType is None:
-            logging.info("PBe2: PBe1 condition not met yet (tradeType=%s). Waiting for PBe1 condition to be satisfied...", pbe1_tradeType)
-            sleepTime = getSleepTime(timeFrame, outsideRth)
-            if sleepTime == 0:
-                sleepTime = 1
-            await asyncio.sleep(sleepTime)
-            continue
-        
-        # Check if PBe1 condition matches user's selected direction
-        if buySellType != pbe1_tradeType:
-            logging.info("PBe2: PBe1 condition found (%s) but doesn't match user direction (%s). Waiting for matching condition...", 
-                        pbe1_tradeType, buySellType)
-            sleepTime = getSleepTime(timeFrame, outsideRth)
-            if sleepTime == 0:
-                sleepTime = 1
-            await asyncio.sleep(sleepTime)
-            continue
-        
-        logging.info("PBe2: PBe1 condition is met! tradeType=%s matches user direction. Proceeding to simulate PBe1 (NO ORDER WILL BE PLACED)", pbe1_tradeType)
+        # PBe2: Use buySellType directly - SAME AS REAL PBe1 (real PBe1 does NOT use pbe1_result)
+        pbe1_tradeType = buySellType
+        logging.info("PBe2: Using user-selected trade type %s (no condition check - same as real PBe1)", pbe1_tradeType)
         
         # PBe1 simulation: Calculate entry price and stop loss (but DON'T place order)
         logging.info("PBe2: Simulating PBe1! tradeType=%s. Calculating entry price and stop loss (NO ORDER WILL BE PLACED)", pbe1_tradeType)
@@ -3848,6 +3826,7 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         pbe1_entry_filled = False  # Track if PBe1 entry would have been filled (calculation only - no real order)
         pbe1_stop_out_allowed = False  # Only True after at least one new bar has closed since entry fill (so PBe2 does not trigger same bar as real PBe1)
         last_processed_bar_datetime = last_candel.get('date') if last_candel else None  # Track last processed bar to detect new bars
+        pbe1_stopped_out = False  # True only when SL hit (not TP); PBe2 real order triggers only on stop out, not on take profit
         
         try:
             while True:
@@ -3913,8 +3892,20 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                             except Exception as e:
                                 logging.debug("PBe2: Error comparing bar datetimes: %s", e)
                     
-                    # Step 2a: Check if simulated PBe1 entry would have been filled (PBe2 logic is independent of any real PBe1 order)
+                    # Step 2a: Check if simulated PBe1 entry would have been filled.
+                    # When running PBe1 and PBe2 together: treat real PBe1 entry fill as simulated entry fill
+                    # (current_price can be "after" the fill — e.g. price bounced — so we'd never see it from price alone)
                     if not pbe1_entry_filled:
+                        # Check if real PBe1 entry order (same symbol) is Filled — align PBe2 with real PBe1
+                        if len(Config.entryTradeType) > 6:
+                            for _oid, _od in Config.orderStatusData.items():
+                                if (_od.get('usersymbol') == symbol
+                                        and _od.get('barType') == Config.entryTradeType[6]  # PBe1
+                                        and _od.get('ordType') == 'Entry'
+                                        and _od.get('status') == 'Filled'):
+                                    pbe1_entry_filled = True
+                                    logging.info("PBe2: Real PBe1 entry order is Filled (orderId=%s). Treating simulated PBe1 entry as filled.", _oid)
+                                    break
                         # Recalculate LOD/HOD when new bar closes
                         if new_bar_closed:
                             updated_lod, updated_hod = _get_pbe1_lod_hod(connection, ibContract, timeFrame, pbe1_tradeType)
@@ -3928,28 +3919,29 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                                     logging.info("PBe2: New bar closed - HOD updated while waiting for entry fill! Old HOD=%s, New HOD=%s.", hod, updated_hod)
                                     hod = updated_hod
                                     pbe1_stop_loss_price = round(hod, Config.roundVal)
-                        # Simulated PBe1 entry fill: price reached entry level (calculation only - no real order; PBe1-in-PBe2 is for calculation only)
-                        if pbe1_tradeType == 'BUY':
-                            if current_price >= pbe1_entry_price:
-                                pbe1_entry_filled = True
-                                # pbe1_stop_out_allowed stays False until we see a new bar close (so PBe2 does not trigger same bar as real PBe1)
-                                logging.info("PBe2: PBe1 entry would have been FILLED! (calculation only) Current price=%s >= entry_price=%s. Will wait for at least one bar after this before allowing stop out.",
-                                           current_price, pbe1_entry_price)
-                            else:
-                                logging.info("PBe2: Waiting for PBe1 entry fill. Current price=%s < entry_price=%s. Waiting...", current_price, pbe1_entry_price)
-                                sleepTime = getSleepTime(timeFrame, outsideRth) or 1
-                                await asyncio.sleep(sleepTime)
-                                continue
-                        else:  # SELL
-                            if current_price <= pbe1_entry_price:
-                                pbe1_entry_filled = True
-                                logging.info("PBe2: PBe1 entry would have been FILLED! (calculation only) Current price=%s <= entry_price=%s. Will wait for at least one bar after this before allowing stop out.",
-                                           current_price, pbe1_entry_price)
-                            else:
-                                logging.info("PBe2: Waiting for PBe1 entry fill. Current price=%s > entry_price=%s. Waiting...", current_price, pbe1_entry_price)
-                                sleepTime = getSleepTime(timeFrame, outsideRth) or 1
-                                await asyncio.sleep(sleepTime)
-                                continue
+                        # Price-based simulated fill check only if not already filled (e.g. by real PBe1)
+                        if not pbe1_entry_filled:
+                            if pbe1_tradeType == 'BUY':
+                                if current_price >= pbe1_entry_price:
+                                    pbe1_entry_filled = True
+                                    # pbe1_stop_out_allowed stays False until we see a new bar close (so PBe2 does not trigger same bar as real PBe1)
+                                    logging.info("PBe2: PBe1 entry would have been FILLED! (calculation only) Current price=%s >= entry_price=%s. Will wait for at least one bar after this before allowing stop out.",
+                                               current_price, pbe1_entry_price)
+                                else:
+                                    logging.info("PBe2: Waiting for PBe1 entry fill. Current price=%s < entry_price=%s. Waiting...", current_price, pbe1_entry_price)
+                                    sleepTime = getSleepTime(timeFrame, outsideRth) or 1
+                                    await asyncio.sleep(sleepTime)
+                                    continue
+                            else:  # SELL
+                                if current_price <= pbe1_entry_price:
+                                    pbe1_entry_filled = True
+                                    logging.info("PBe2: PBe1 entry would have been FILLED! (calculation only) Current price=%s <= entry_price=%s. Will wait for at least one bar after this before allowing stop out.",
+                                               current_price, pbe1_entry_price)
+                                else:
+                                    logging.info("PBe2: Waiting for PBe1 entry fill. Current price=%s > entry_price=%s. Waiting...", current_price, pbe1_entry_price)
+                                    sleepTime = getSleepTime(timeFrame, outsideRth) or 1
+                                    await asyncio.sleep(sleepTime)
+                                    continue
                     
                     # Step 2b: After entry is filled, monitor for stop out
                     if pbe1_entry_filled:
@@ -3986,6 +3978,18 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                         else:
                             bar_low = bar_high = round(float(last_candel.get('close', 0)), Config.roundVal)
                         
+                        # When running with real PBe1: if real PBe1 stop loss order is Filled, trigger PBe2 immediately (no need to wait for new bar)
+                        if len(Config.entryTradeType) > 6:
+                            for _oid, _od in Config.orderStatusData.items():
+                                if (_od.get('usersymbol') == symbol
+                                        and _od.get('barType') == Config.entryTradeType[6]  # PBe1
+                                        and _od.get('ordType') == 'StopLoss'
+                                        and _od.get('status') == 'Filled'):
+                                    pbe1_stopped_out = True
+                                    logging.info("PBe2: Real PBe1 stop loss order is Filled (orderId=%s). Triggering PBe2 replay.", _oid)
+                                    break
+                            if pbe1_stopped_out:
+                                break
                         # Stop out = price hit stop loss OR take profit (same as real PBe1) - only after at least one bar since entry fill
                         if not pbe1_stop_out_allowed:
                             logging.info("PBe2: PBe1 entry filled (calculation only). Waiting for at least one new bar to close before allowing stop out check...")
@@ -3995,18 +3999,28 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                         if pbe1_tradeType == 'BUY':
                             sl_hit = bar_low <= pbe1_stop_loss_price
                             tp_hit = bar_high >= pbe1_tp_price
-                            if sl_hit or tp_hit:
-                                logging.info("PBe2: PBe1 stopped out! bar_low=%s, bar_high=%s, SL=%s, TP=%s. %s hit. Proceeding to replay PBe2...",
-                                             bar_low, bar_high, pbe1_stop_loss_price, pbe1_tp_price, "SL" if sl_hit else "TP")
+                            if sl_hit:
+                                pbe1_stopped_out = True
+                                logging.info("PBe2: PBe1 stopped out (SL hit)! bar_low=%s, bar_high=%s, SL=%s, TP=%s. Proceeding to replay PBe2...",
+                                             bar_low, bar_high, pbe1_stop_loss_price, pbe1_tp_price)
+                                break
+                            if tp_hit:
+                                logging.info("PBe2: PBe1 would have closed at TP (not stopped out). bar_high=%s >= TP=%s. Resuming wait for new PBe1 condition.",
+                                             bar_high, pbe1_tp_price)
                                 break
                             logging.info("PBe2: PBe1 entry filled. bar_low=%s > SL=%s and bar_high=%s < TP=%s. Waiting for SL or TP...",
                                          bar_low, pbe1_stop_loss_price, bar_high, pbe1_tp_price)
                         else:  # SELL
                             sl_hit = bar_high >= pbe1_stop_loss_price
                             tp_hit = bar_low <= pbe1_tp_price
-                            if sl_hit or tp_hit:
-                                logging.info("PBe2: PBe1 stopped out! bar_high=%s, bar_low=%s, SL=%s, TP=%s. %s hit. Proceeding to replay PBe2...",
-                                             bar_high, bar_low, pbe1_stop_loss_price, pbe1_tp_price, "SL" if sl_hit else "TP")
+                            if sl_hit:
+                                pbe1_stopped_out = True
+                                logging.info("PBe2: PBe1 stopped out (SL hit)! bar_high=%s, bar_low=%s, SL=%s, TP=%s. Proceeding to replay PBe2...",
+                                             bar_high, bar_low, pbe1_stop_loss_price, pbe1_tp_price)
+                                break
+                            if tp_hit:
+                                logging.info("PBe2: PBe1 would have closed at TP (not stopped out). bar_low=%s <= TP=%s. Resuming wait for new PBe1 condition.",
+                                             bar_low, pbe1_tp_price)
                                 break
                             logging.info("PBe2: PBe1 entry filled. bar_high=%s < SL=%s and bar_low=%s > TP=%s. Waiting for SL or TP...",
                                          bar_high, pbe1_stop_loss_price, bar_low, pbe1_tp_price)
@@ -4024,6 +4038,11 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                     connection.ib.cancelMktData(ibContract)
                 except Exception as e:
                     logging.debug("PBe2: Error canceling market data: %s", e)
+        
+        # Only place real PBe2 order when simulated PBe1 was STOPPED OUT (SL hit). If TP was hit, resume waiting for new PBe1 condition.
+        if not pbe1_stopped_out:
+            logging.info("PBe2: Simulated PBe1 closed at TP (not stopped out). Resuming monitoring for new PBe1 condition.")
+            continue
         
         # Step 3: PBe1 would have stopped out! Now replay PBe1 logic (REPLAY MODE)
         logging.info("PBe2: PBe1 would have stopped out. Now replaying PBe1 logic (REPLAY MODE - no condition check, just replay PBe1)...")
@@ -4088,9 +4107,32 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
         
         logging.info(f"PBe2: entry_price={entry_price}, stop_loss_price={stop_loss_price}, stop_size={stop_size}, LOD={lod}, HOD={hod}")
         
-        # Calculate quantity: qty = risk / stop_size
+        # Calculate quantity: use same risk as PBe1 when real PBe1 stopped out (match UI risk amount)
         risk_amount = _to_float(risk, 0)
-        if risk_amount <= 0:
+        pbe1_stop_size = None
+        pbe1_quantity = None
+        if len(Config.entryTradeType) > 6:
+            for _oid, _od in Config.orderStatusData.items():
+                if (_od.get('usersymbol') == symbol
+                        and _od.get('barType') == Config.entryTradeType[6]  # PBe1
+                        and _od.get('ordType') == 'Entry'
+                        and _od.get('status') == 'Filled'):
+                    pbe1_stop_size = _od.get('stopSize') or _od.get('calculated_stop_size')
+                    pbe1_quantity = _od.get('totalQuantity') or _od.get('quantity')
+                    if pbe1_quantity is not None and hasattr(pbe1_quantity, '__float__'):
+                        pbe1_quantity = int(round(float(pbe1_quantity), 0))
+                    elif isinstance(pbe1_quantity, (int, float)):
+                        pbe1_quantity = int(round(float(pbe1_quantity), 0))
+                    if pbe1_stop_size is not None:
+                        pbe1_stop_size = float(pbe1_stop_size)
+                    logging.info(f"PBe2: Found real PBe1 entry (orderId={_oid}): stop_size={pbe1_stop_size}, quantity={pbe1_quantity}")
+                    break
+        
+        if (pbe1_quantity is not None and pbe1_quantity > 0):
+            # Use same share size as PBe1 when real PBe1 stopped out
+            quantity = pbe1_quantity
+            logging.info(f"PBe2 quantity (same as PBe1 share size): quantity={quantity}")
+        elif risk_amount <= 0:
             logging.warning("Invalid risk amount for PBe2: %s, using default quantity of 1", risk)
             quantity = 1
         elif stop_size == 0 or stop_size < 0.01:
@@ -4101,14 +4143,25 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
             quantity = int(round(quantity, 0))
             if quantity <= 0:
                 quantity = 1
-        logging.info(f"PBe2 quantity calculated: entry={entry_price}, stop_loss={stop_loss_price}, stop_size={stop_size}, risk={risk_amount}, quantity={quantity}")
+            logging.info(f"PBe2 quantity calculated: entry={entry_price}, stop_loss={stop_loss_price}, stop_size={stop_size}, risk={risk_amount}, quantity={quantity}")
         
-        # Place PBe2 order using sendEntryTrade (same logic as PBe1 - REPLAY MODE)
-        logging.info("PBe2 REPLAY MODE: Placing PBe2 order using sendEntryTrade (same logic as PBe1)")
-        sendEntryTrade(connection, ibContract, tradeType, quantity, histData, entry_price, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage, slValue, breakEven, outsideRth)
+        # Check for existing active PBe2 entry order to avoid duplicate orders (e.g. when pull_back_PBe2 is triggered twice)
+        existing_pbe2_entry = None
+        for _oid, _od in Config.orderStatusData.items():
+            if (_od.get('usersymbol') == symbol
+                    and _od.get('barType') == barType
+                    and _od.get('ordType') == 'Entry'
+                    and _od.get('status') in ('PendingSubmit', 'PreSubmitted', 'Submitted')):
+                existing_pbe2_entry = (_oid, _od)
+                logging.info("PBe2 REPLAY MODE: Found existing active PBe2 entry orderId=%s, status=%s - skipping duplicate placement", _oid, _od.get('status'))
+                break
         
-        # Wait a moment for StatusUpdate to complete and store order in orderStatusData
-        await asyncio.sleep(0.2)
+        if existing_pbe2_entry is None:
+            # Place PBe2 order using sendEntryTrade (same logic as PBe1 - REPLAY MODE)
+            logging.info("PBe2 REPLAY MODE: Placing PBe2 order using sendEntryTrade (same logic as PBe1)")
+            sendEntryTrade(connection, ibContract, tradeType, quantity, histData, entry_price, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage, slValue, breakEven, outsideRth)
+            # Wait a moment for StatusUpdate to complete and store order in orderStatusData
+            await asyncio.sleep(0.2)
         
         # Get the order ID from orderStatusData to start pbe2_loop_run (PBe2 uses pbe2_loop_run, not pbe1_loop_run)
         entry_order = None
@@ -4451,32 +4504,36 @@ async def _update_pbe_stop_size_and_quantity(connection, order_id, is_pbe1=True)
             logging.warning(f"PBe1/PBe2: Invalid stop_size ({new_stop_size}), skipping update")
             return
         
-        # Recalculate quantity based on new stop_size
-        risk_amount = _to_float(old_order.get('risk', 0), 0)
-        if risk_amount <= 0:
-            logging.warning(f"PBe1/PBe2: Invalid risk amount ({risk_amount}), skipping quantity update")
-            return
-        
-        new_quantity = risk_amount / new_stop_size
-        new_quantity = int(math.ceil(new_quantity))  # Round UP
-        if new_quantity <= 0:
-            new_quantity = 1
+        # Recalculate quantity based on new stop_size (PBe1 only - PBe2 quantity stays fixed to match PBe1 risk)
+        old_quantity = old_order.get('totalQuantity', old_order.get('quantity', 0))
+        if is_pbe1:
+            risk_amount = _to_float(old_order.get('risk', 0), 0)
+            if risk_amount <= 0:
+                logging.warning(f"PBe1: Invalid risk amount ({risk_amount}), skipping quantity update")
+                return
+            new_quantity = risk_amount / new_stop_size
+            new_quantity = int(math.ceil(new_quantity))  # Round UP
+            if new_quantity <= 0:
+                new_quantity = 1
+        else:
+            # PBe2: Keep quantity fixed - it was set at placement to match PBe1 risk
+            # (entry order quantity is never modified by pbe2_loop_run)
+            new_quantity = old_quantity
         
         # Update stored values
-        old_quantity = old_order.get('totalQuantity', old_order.get('quantity', 0))
         old_order['pbe1_lod'] = lod
         old_order['pbe1_hod'] = hod
         old_order['stopLossPrice'] = new_stop_loss_price
         old_order['stopSize'] = new_stop_size
         old_order['calculated_stop_size'] = new_stop_size
-        old_order['totalQuantity'] = new_quantity  # Update quantity for TP/SL orders
-        old_order['quantity'] = new_quantity  # Also update quantity field for compatibility
+        old_order['totalQuantity'] = new_quantity
+        old_order['quantity'] = new_quantity
         Config.orderStatusData[order_id] = old_order
         
         bar_type_name = "PBe1" if is_pbe1 else "PBe2"
         logging.info(f"{bar_type_name} 30s Update: stop_size={new_stop_size} (old={old_order.get('stopSize', 'N/A')}), quantity={new_quantity} (old={old_quantity}), stop_loss={new_stop_loss_price}, LOD={lod}, HOD={hod}")
         
-        # If entry is filled, update TP/SL orders with new quantity
+        # If entry is filled, update TP/SL orders with new quantity (PBe2: quantity unchanged, only stop_size/price)
         if old_order['status'] == 'Filled':
             # Find TP and SL orders and update their quantity
             for tp_sl_order_id, tp_sl_order_data in Config.orderStatusData.items():
@@ -4784,12 +4841,14 @@ async def pbe1_loop_run(connection, key, entry_order):
                     
                     limit_price = round(limit_price, Config.roundVal)
                     logging.info(f"PBe1 Extended hours Update: STP LMT, Stop={aux_price} (bar_high/low ± 0.01), Limit={limit_price} (stop ± 0.5×stop_size={entry_limit_offset}), stop_size={stop_size}")
-                    new_order = Order(orderType="STP LMT", action=order.action, totalQuantity=order.totalQuantity, 
+                    qty = old_order.get('totalQuantity', old_order.get('quantity', order.totalQuantity))
+                    new_order = Order(orderType="STP LMT", action=order.action, totalQuantity=qty, 
                                     tif='DAY', auxPrice=aux_price, lmtPrice=limit_price)
                 else:
                     # RTH: Update only entry order (TP/SL are sent separately after fill)
                     logging.info(f"PBe1 RTH Update: STP, Stop={aux_price} (bar_high/low ± 0.01)")
-                    new_order = Order(orderType="STP", action=order.action, totalQuantity=order.totalQuantity,  
+                    qty = old_order.get('totalQuantity', old_order.get('quantity', order.totalQuantity))
+                    new_order = Order(orderType="STP", action=order.action, totalQuantity=qty,  
                                     tif='DAY', auxPrice=aux_price)
                 
                 # Try to cancel the old order (may fail if already cancelled, but that's okay)
@@ -6684,9 +6743,9 @@ async def sendTpSlBuy(connection, entryData):
             # chart_Time needed for get_sl_for_selling/get_sl_for_buying when deriving stop_size from SL price for TP
             chart_Time = datetime.datetime.strptime(str(datetime.datetime.now().date()) + " " + Config.tradingTime, "%Y-%m-%d %H:%M:%S")
             
-            # Skip RB/RBB/PBe1 section for manual orders - they have their own logic
-            # Conditional Order, FB, RB, RBB, PBe1, LB, LB2, LB3 use same TP/SL logic
-            if (entryData['barType'] == Config.entryTradeType[2]) or (entryData['barType'] == Config.entryTradeType[3]) or (entryData['barType'] == Config.entryTradeType[4]) or (entryData['barType'] == Config.entryTradeType[5]) or (entryData['barType'] == Config.entryTradeType[6]) or (entryData['barType'] == Config.entryTradeType[9]) or (entryData['barType'] == Config.entryTradeType[10]):
+            # Skip RB/RBB/PBe1/PBe2 section for manual orders - they have their own logic
+            # Conditional Order, FB, RB, RBB, PBe1, PBe2, LB, LB2, LB3 use same TP/SL logic
+            if (entryData['barType'] == Config.entryTradeType[2]) or (entryData['barType'] == Config.entryTradeType[3]) or (entryData['barType'] == Config.entryTradeType[4]) or (entryData['barType'] == Config.entryTradeType[5]) or (entryData['barType'] == Config.entryTradeType[6]) or (entryData['barType'] == Config.entryTradeType[7]) or (entryData['barType'] == Config.entryTradeType[9]) or (entryData['barType'] == Config.entryTradeType[10]):
                 candleData = connection.getDailyCandle(entryData['contract'])
                 if (candleData == None or len(candleData) < 1):
                     logging.info("candle data not found for %s", entryData['contract'])
@@ -6702,10 +6761,11 @@ async def sendTpSlBuy(connection, entryData):
                 is_pbe1_or_pbe2 = is_pbe1 or is_pbe2  # PBe1 or PBe2
                 is_lod_hod = (stop_loss_type == Config.stopLoss[3]) or (stop_loss_type == Config.stopLoss[4])  # HOD or LOD
                 
-                if is_pbe1:  # PBe1 - always uses HOD/LOD for stop loss (similar to RBB+HOD/LOD)
-                    # PBe1: Entry price for TP = entry_stop_price (bar_high/low ± 0.01), stop_size = |entry_stop_price - HOD/LOD|
+                if is_pbe1_or_pbe2:  # PBe1 or PBe2 - always uses HOD/LOD for stop loss (similar to RBB+HOD/LOD)
+                    # PBe1/PBe2: Entry price for TP = entry_stop_price (bar_high/low ± 0.01), stop_size = |entry_stop_price - HOD/LOD|
                     # For RTH: Recalculate stop_size using current HOD/LOD (same as stop loss)
                     # For extended hours: Use stored stop_size (HOD/LOD doesn't change during extended hours)
+                    bar_type_name = "PBe1" if is_pbe1 else "PBe2"
                     is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
                     
                     if not is_extended:
@@ -6790,14 +6850,14 @@ async def sendTpSlBuy(connection, entryData):
                         price = float(entry_stop_price) + (multiplier * pbe_stop_size)
                     
                     price = round(price, Config.roundVal)
-                    logging.info(f"PBe1 TP calculation: entry_stop_price={entry_stop_price} (entry price), stop_size={pbe_stop_size}, multiplier={multiplier}, tp={price}")
+                    logging.info(f"{bar_type_name} TP calculation: entry_stop_price={entry_stop_price} (entry price), stop_size={pbe_stop_size}, multiplier={multiplier}, tp={price}")
                     
-                    # Send TP order directly for PBe1 - don't fall through to duplicate send
+                    # Send TP order directly for PBe1/PBe2 - don't fall through to duplicate send
                     if entryData.get('action') == 'SELL':  # SHORT position
                         tp_action = "BUY"  # To close short
                     else:  # LONG position
                         tp_action = "SELL"  # To close long
-                    logging.info(f"PBe1 Sending TP Trade EntryData is %s  and Price is %s  and action is {tp_action}", entryData, price)
+                    logging.info(f"{bar_type_name} Sending TP Trade EntryData is %s  and Price is %s  and action is {tp_action}", entryData, price)
                     sendTakeProfit(connection, entryData, price, tp_action)
                     # Skip the rest of TP calculation - already sent
                     price = None  # Mark as already sent
@@ -6872,73 +6932,9 @@ async def sendTpSlBuy(connection, entryData):
                         stop_size = round((float(histData['high']) - float(histData['low']) + Config.add002), Config.roundVal)
                     logging.info(f"RB/RBB bar-based TP (SHORT): Using bar-based stop_size={stop_size} for take profit")
 
-                # For PBe2: Calculate TP immediately using stored stop_size (PBe1 already handled above)
-                if is_pbe2:  # PBe2 - similar to PBe1
-                    # PBe2: Entry price for TP = entry_stop_price (bar_high/low ± 0.01), stop_size = |entry_stop_price - HOD/LOD|
-                    # Get stored LOD/HOD from orderStatusData
-                    order_id = entryData.get('orderId')
-                    order_data = Config.orderStatusData.get(order_id) if order_id else None
-                    
-                    if order_data and 'pbe1_lod' in order_data and 'pbe1_hod' in order_data:
-                        lod = order_data.get('pbe1_lod', 0)
-                        hod = order_data.get('pbe1_hod', 0)
-                        stored_stop_size = order_data.get('stopSize', 0)
-                        
-                        # For SHORT position (SELL entry): stop_size = |entry_stop_price - HOD|
-                        if entryData.get('action') == 'SELL':  # SHORT position
-                            pbe_stop_size = stored_stop_size if stored_stop_size > 0 else abs(float(entry_stop_price) - hod)
-                            logging.info(f"PBe2 TP (SHORT): Using stored stop_size={pbe_stop_size} from HOD={hod}, entry_stop_price={entry_stop_price}")
-                        else:  # LONG position (BUY entry)
-                            pbe_stop_size = stored_stop_size if stored_stop_size > 0 else abs(float(entry_stop_price) - lod)
-                            logging.info(f"PBe2 TP (LONG): Using stored stop_size={pbe_stop_size} from LOD={lod}, entry_stop_price={entry_stop_price}")
-                        
-                        pbe_stop_size = round(pbe_stop_size, Config.roundVal)
-                        if pbe_stop_size <= 0:
-                            logging.error(f"PBe2 TP: Invalid stop_size ({pbe_stop_size}) from HOD/LOD. HOD={hod}, LOD={lod}, entry_stop_price={entry_stop_price}")
-                            pbe_stop_size = 0
-                    else:
-                        # Fallback: recalculate from HOD/LOD
-                        logging.warning(f"PBe2: LOD/HOD not found in orderStatusData, recalculating")
-                        lod, hod, recent_bar_data = _get_lod_hod_for_stop_loss(connection, entryData['contract'], entryData['timeFrame'])
-                        if entryData.get('action') == 'SELL':  # SHORT position
-                            pbe_stop_size = abs(float(entry_stop_price) - hod) if hod else 0
-                        else:  # LONG position
-                            pbe_stop_size = abs(float(entry_stop_price) - lod) if lod else 0
-                        pbe_stop_size = round(pbe_stop_size, Config.roundVal)
-                        logging.warning(f"PBe2 TP: Recalculated stop_size={pbe_stop_size} from HOD/LOD")
-                    
-                    # Calculate TP: entry_stop_price ± stop_size * multiplier
-                    multiplier_map = {
-                        Config.takeProfit[0]: 1,    # 1:1
-                        Config.takeProfit[1]: 1.5,  # 1.5:1
-                        Config.takeProfit[2]: 2,    # 2:1
-                        Config.takeProfit[3]: 2.5,  # 2.5:1
-                    }
-                    if len(Config.takeProfit) > 4:
-                        multiplier_map[Config.takeProfit[4]] = 3  # 3:1
-                    
-                    multiplier = multiplier_map.get(entryData['profit'], 2.0)  # Default 2:1
-                    if entryData.get('action') == 'SELL':  # SHORT position
-                        # For SHORT: TP = entry_stop_price - (multiplier × stop_size)
-                        price = float(entry_stop_price) - (multiplier * pbe_stop_size)
-                    else:  # LONG position
-                        # For LONG: TP = entry_stop_price + (multiplier × stop_size)
-                        price = float(entry_stop_price) + (multiplier * pbe_stop_size)
-                    
-                    price = round(price, Config.roundVal)
-                    logging.info(f"PBe2 TP calculation: entry_stop_price={entry_stop_price}, stop_size={pbe_stop_size}, multiplier={multiplier}, tp={price}")
-                    
-                    # Send TP order directly for PBe2 - don't fall through to duplicate send
-                    if entryData.get('action') == 'SELL':  # SHORT position
-                        tp_action = "BUY"  # To close short
-                    else:  # LONG position
-                        tp_action = "SELL"  # To close long
-                    logging.info(f"PBe2 Sending TP Trade EntryData is %s  and Price is %s  and action is {tp_action}", entryData, price)
-                    sendTakeProfit(connection, entryData, price, tp_action)
-                    # Skip the rest of TP calculation - already sent
-                    price = None  # Mark as already sent
-                    # Continue to stop loss calculation - don't return early
-                else:
+                # PBe2: Already handled above in is_pbe1_or_pbe2 block (same TP logic as PBe1) - no separate block needed
+                # to avoid duplicate TP send
+                if not is_pbe2:
                     # For other trade types (FB/RB/RBB/LB/LB2/LB3): use shared calculation
                     # Skip if price is already None (PBe1/PBe2 already sent TP)
                     if price is None:

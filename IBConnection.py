@@ -71,6 +71,11 @@ class connection:
         if Config.orderStatusData.get(trade.order.orderId) != None:
             data = Config.orderStatusData.get(trade.order.orderId)
             data.update({'status': trade.orderStatus.status})
+            # When Entry order fills, use actual filled quantity so TP/SL match the entry (not orderStatusData which may have been updated by 30s cycle)
+            if trade.orderStatus.status == 'Filled' and data.get('ordType') == 'Entry':
+                filled_qty = getattr(trade.orderStatus, 'filled', None)
+                if filled_qty is not None:
+                    data.update({'totalQuantity': int(filled_qty), 'quantity': int(filled_qty)})
             if hasattr(trade.orderStatus, 'whyHeld') and trade.orderStatus.whyHeld:
                 data.update({'whyHeld': trade.orderStatus.whyHeld})
             Config.orderStatusData.update({trade.order.orderId: data})
