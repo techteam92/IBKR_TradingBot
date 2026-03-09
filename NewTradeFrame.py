@@ -446,7 +446,7 @@ def _setup_hotkeys(root):
     HOT KEYS:
       SHIFT+ENTER = Execute
       Stop Loss: SHIFT+S=Custom, SHIFT+L=LOD, SHIFT+H=HOD, SHIFT+1/2/3/4 = 10/20/25/33% ATR
-      Trade Type: ALT+E=Custom, ALT+A=Ask+.05, ALT+B=Bid-.05, ALT+F=FB, ALT+L=Last Bar (LB),
+      Trade Type: ALT+E=Custom, ALT+A=ASK+1/2, ALT+B=BID-1/2, ALT+F=FB, ALT+L=Last Bar (LB),
                   ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
       Time Frame: CTRL+1/2/3/5/6/7 = 1/2/3/5/10/15 min
       Profit: ALT+1/2/3 = 1:1, 2:1, 3:1
@@ -524,10 +524,10 @@ def _setup_hotkeys(root):
     # Trade Type: ALT+E=Custom, ALT+A=Ask+.05, ALT+B=Bid-.05, ALT+F=FB, ALT+L=Last Bar (LB), ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
     root.bind("<Alt-e>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
     root.bind("<Alt-E>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
-    root.bind("<Alt-a>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "0.05")))
-    root.bind("<Alt-A>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "0.05")))
-    root.bind("<Alt-b>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "-0.05")))
-    root.bind("<Alt-B>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "-0.05")))
+    root.bind("<Alt-a>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("ASK + 1/2"))))
+    root.bind("<Alt-A>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("ASK + 1/2"))))
+    root.bind("<Alt-b>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("BID - 1/2"))))
+    root.bind("<Alt-B>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("BID - 1/2"))))
     root.bind("<Alt-f>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("FB"))))
     root.bind("<Alt-F>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("FB"))))
     root.bind("<Alt-l>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("LB"))))
@@ -1226,8 +1226,8 @@ def addField(rowYPosition, initial_status_text=""):
             stpLossEntry.config(state="readonly")
             stopLossValueEntry.config(state="normal")
         
-        # If selecting Limit Order or Stop Order, show modal
-        if current_selection in Config.manualOrderTypes:
+        # If selecting Limit Order or Custom, show entry price modal (ASK + 1/2 and BID - 1/2 use formula, no modal)
+        if current_selection in Config.manualOrderTypes and current_selection not in ('ASK + 1/2', 'BID - 1/2'):
             # The previous index is what was stored before this change
             combo._previous_index = previous_trade_type_index[0]
             order_type_name = current_selection

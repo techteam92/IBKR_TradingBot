@@ -71,7 +71,7 @@ timeInForce=['DAY','OTH','GTC']
 # recent rbb
 # recet bar [rb, recent bar BY Bar]
 # pullbacj divide in two -------------  new pbe1 (close second trade)   new e2   old pbe1e2
-manualOrderTypes = ['Custom','Limit Order']
+manualOrderTypes = ['Custom','Limit Order','ASK + 1/2','BID - 1/2']
 entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','LB','LB2','LB3']
 buySell=['BUY','SELL']
 prePostBool=[False,True]

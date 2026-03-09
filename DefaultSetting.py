@@ -132,7 +132,10 @@ def content():
     update.place(relx=0.43, rely=0.9, anchor=CENTER)
 
 
-def updateSetting():
+def _write_setting_form_to_config_and_file():
+    """Write current Setting dialog values to Config.defaultValue and persist to file."""
+    if not data:
+        return
     Config.defaultValue.update({"tif": data.get("tif").get()})
     Config.defaultValue.update({"symbol": ""})
     Config.defaultValue.update({"timeFrame": data.get("timeFrame").get()})
@@ -142,16 +145,15 @@ def updateSetting():
     Config.defaultValue.update({"entryType": data.get("entryType").get()})
     Config.defaultValue.update({"buySellType": data.get("buySellType").get()})
     Config.defaultValue.update({"atr": data.get("atr").get()})
-    # Replay: same as UI - when On, stop loss fill will re-enter the trade
     replay_val = data.get("replay").get()
     Config.defaultValue.update({"replay": replay_val == "On"})
-    # Break Even: store as "True"/"False" for compatibility with NewTradeFrame
     break_even_val = data.get("breakEven").get()
     Config.defaultValue.update({"breakEven": "True" if break_even_val == "On" else "False"})
-
-    # Config.defaultValue.update({"rthType": data.get("rth").get()})
-    # Config.defaultValue.update({"pnl": data.get("pnl").get()})
     StatusSaveInFile()
+
+
+def updateSetting():
+    _write_setting_form_to_config_and_file()
     tkinter.messagebox.showinfo('Success', "Setting Saved")
 
 # def setDefaultSymbol(symbol):
@@ -226,4 +228,10 @@ def setDefaultBreakEven(breakEvenCombo):
     breakEvenCombo.current(1 if on else 0)
 
 def on_closing():
+    # Save current settings when closing the dialog so they persist and load on next app run
+    try:
+        _write_setting_form_to_config_and_file()
+        logging.debug("Settings saved on Setting dialog close")
+    except Exception as e:
+        logging.warning("Could not save settings on close: %s", e)
     settingFrame.destroy()

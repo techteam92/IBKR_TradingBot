@@ -172,6 +172,65 @@ def _parse_entry_price(entry_points):
     return round(price, Config.roundVal)
 
 
+def _is_limit_style_entry(bar_type):
+    """True if bar_type uses Limit Order TP/SL logic after fill (Limit Order, ASK + 1/2, BID - 1/2)."""
+    return bar_type in ('Limit Order', 'ASK + 1/2', 'BID - 1/2')
+
+
+async def _get_ask_bid(connection, contract, wait_sec=0.5):
+    """
+    Request market data and return (ask, bid). Returns (None, None) if unavailable.
+    """
+    ticker = None
+    try:
+        ticker = connection.ib.reqMktData(contract, '', False, False)
+        await asyncio.sleep(wait_sec)
+        ask = getattr(ticker, 'ask', None) if ticker else None
+        bid = getattr(ticker, 'bid', None) if ticker else None
+        if ask is not None and bid is not None:
+            try:
+                ask = float(ask)
+                bid = float(bid)
+                if not (math.isnan(ask) or math.isnan(bid)):
+                    return ask, bid
+            except (TypeError, ValueError):
+                pass
+        # Fallback: use last or close
+        last = getattr(ticker, 'last', None) if ticker else None
+        close = getattr(ticker, 'close', None) if ticker else None
+        p = last if last is not None else close
+        if p is not None:
+            try:
+                p = float(p)
+                if not math.isnan(p):
+                    return p, p
+            except (TypeError, ValueError):
+                pass
+    except Exception as e:
+        logging.debug("_get_ask_bid: %s", e)
+    return None, None
+
+
+def _get_stop_price_for_ask_bid_half(connection, contract, stop_loss, buy_sell_type, time_frame, sl_value, reference_price):
+    """
+    Get stop loss price for ASK + 1/2 / BID - 1/2 using reference_price (ask or bid).
+    Returns float or None.
+    """
+    if stop_loss == Config.stopLoss[1]:  # Custom
+        custom_stop = _to_float(sl_value, 0)
+        if custom_stop == 0:
+            return None
+        return float(custom_stop)
+    try:
+        raw_stop_loss_price, _ = _calculate_manual_stop_loss(
+            connection, contract, reference_price, stop_loss, buy_sell_type, time_frame, sl_value
+        )
+        return raw_stop_loss_price
+    except Exception as e:
+        logging.debug("_get_stop_price_for_ask_bid_half: %s", e)
+        return None
+
+
 def _calculate_manual_stop_loss(connection, contract, entry_price, stop_loss_type, buy_sell_type, time_frame, sl_value):
     """
     Calculate stop loss price for manual orders (Limit Order and Stop Order).
@@ -1318,6 +1377,45 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                                 tp_response.order.orderId, sl_response.order.orderId)
         logging.info("rb_and_rbb entry order done %s ",symbol)
         break
+
+
+async def manual_limit_order_ask_bid_half(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                                         atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points):
+    """
+    Place a limit order with entry price from formula:
+    - ASK + 1/2: limit = ASK + (ASK - STOP) / 2  (intended for BUY)
+    - BID - 1/2: limit = BID - (STOP - BID) / 2  (intended for SELL)
+    STOP comes from stop loss (Custom slValue or calculated). Then delegates to manual_limit_order for TP/SL.
+    """
+    contract = getContract(symbol, None)
+    ask, bid = await _get_ask_bid(connection, contract)
+    if ask is None and bid is None:
+        logging.error("ASK + 1/2 / BID - 1/2: Could not get market data (ask/bid) for %s", symbol)
+        return
+    if barType == 'ASK + 1/2':
+        reference = ask if ask is not None else bid
+        stop_price = _get_stop_price_for_ask_bid_half(connection, contract, stopLoss, buySellType, timeFrame, slValue, reference)
+        if stop_price is None:
+            logging.error("ASK + 1/2: Could not get stop price for %s (stopLoss=%s). Use Custom stop with a value.", symbol, stopLoss)
+            return
+        # limit = ask + (ask - stop) / 2
+        limit_price = reference + (reference - stop_price) / 2
+        limit_price = round(limit_price, Config.roundVal)
+        logging.info("ASK + 1/2: ask=%s, stop=%s, limit=%s", reference, stop_price, limit_price)
+    else:  # BID - 1/2
+        reference = bid if bid is not None else ask
+        stop_price = _get_stop_price_for_ask_bid_half(connection, contract, stopLoss, buySellType, timeFrame, slValue, reference)
+        if stop_price is None:
+            logging.error("BID - 1/2: Could not get stop price for %s (stopLoss=%s). Use Custom stop with a value.", symbol, stopLoss)
+            return
+        # limit = bid - (stop - bid) / 2
+        limit_price = reference - (stop_price - reference) / 2
+        limit_price = round(limit_price, Config.roundVal)
+        logging.info("BID - 1/2: bid=%s, stop=%s, limit=%s", reference, stop_price, limit_price)
+    # Delegate to manual_limit_order with computed entry (same TP/SL as Limit Order)
+    await manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                             atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, str(limit_price))
+
 
 async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                              atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points):
@@ -5246,7 +5344,12 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             await manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                      atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
             return
-        elif barType == 'Custom':
+        if barType in ('ASK + 1/2', 'BID - 1/2'):
+            logging.debug("Routing to manual_limit_order_ask_bid_half for barType='%s'", barType)
+            await manual_limit_order_ask_bid_half(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+                                                 atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
+            return
+        if barType == 'Custom':
             logging.debug("Routing to manual_stop_order for barType='%s'", barType)
             await manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                     atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points)
@@ -7182,8 +7285,8 @@ async def sendTpSlBuy(connection, entryData):
                             # Fallback to regular calculation if ATR unavailable
                             logging.warning(f"Manual Order Custom+ATR TP (SHORT): ATR stop_size unavailable, using fallback calculation")
                             price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
-                    elif entryData['barType'] == 'Custom' and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom entry type with non-Custom, non-ATR stop loss
-                        # For Custom entry type in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
+                    elif (entryData['barType'] == 'Custom' or _is_limit_style_entry(entryData['barType'])) and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom/Limit-style entry with non-Custom, non-ATR stop loss
+                        # For Custom/Limit-style entry in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
                         order_id = entryData.get('orderId')
                         order_data = Config.orderStatusData.get(order_id) if order_id else None
                         stored_stop_size = order_data.get('stopSize') if order_data else None
@@ -7207,8 +7310,8 @@ async def sendTpSlBuy(connection, entryData):
                             # Fallback to regular calculation if stop_size not found
                             logging.warning(f"Custom entry OTH TP (SHORT): stop_size not found in orderStatusData, using fallback calculation")
                             price = get_tp_for_buying(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
-                # Check if this is a Limit Order with ATR stop loss - use same ATR stop_size for TP
-                elif entryData['barType'] == Config.entryTradeType[0] and entryData.get('stopLoss') in Config.atrStopLossMap:
+                # Check if this is a Limit Order, ASK + 1/2, or BID - 1/2 with ATR stop loss - use same ATR stop_size for TP
+                elif _is_limit_style_entry(entryData['barType']) and entryData.get('stopLoss') in Config.atrStopLossMap:
                     # Use ATR stop_size for take profit calculation (same as entry and stop loss)
                     atr_offset = _get_atr_stop_offset(connection, entryData['contract'], entryData['stopLoss'])
                     if atr_offset is not None and atr_offset > 0:
@@ -9189,8 +9292,8 @@ async def sendTpSlSell(connection, entryData):
                             price = round(price, Config.roundVal)
                             logging.info(f"Manual Order Custom TP (LONG): entry_stop_price={entry_stop_price} (Entry Custom), custom_stop={custom_stop}, stop_size={stop_size}, multiplier={multiplier}, tp={price}")
                         # Skip further processing for custom stop loss - price is already set
-                    elif entryData['barType'] == 'Custom' and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom entry type with non-Custom, non-ATR stop loss
-                        # For Custom entry type in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
+                    elif (entryData['barType'] == 'Custom' or _is_limit_style_entry(entryData['barType'])) and stop_loss_type not in Config.atrStopLossMap and stop_loss_type != Config.stopLoss[1]:  # Custom/Limit-style entry with non-Custom, non-ATR stop loss
+                        # For Custom/Limit-style entry in extended hours with non-Custom, non-ATR stop loss: use stored stop_size
                         order_id = entryData.get('orderId')
                         order_data = Config.orderStatusData.get(order_id) if order_id else None
                         stored_stop_size = order_data.get('stopSize') if order_data else None
@@ -9209,13 +9312,13 @@ async def sendTpSlSell(connection, entryData):
                             # For LONG position (SELL TP): TP = entry + (multiplier × stop_size)
                             price = float(entry_stop_price) + (multiplier * stop_size)
                             price = round(price, Config.roundVal)
-                            logging.info(f"Custom entry OTH TP (LONG): entry={entry_stop_price}, stop_size={stored_stop_size} (from orderStatusData), stopLoss={stop_loss_type}, multiplier={multiplier}, tp={price}")
+                            logging.info(f"Custom/Limit-style entry OTH TP (LONG): entry={entry_stop_price}, stop_size={stored_stop_size} (from orderStatusData), stopLoss={stop_loss_type}, multiplier={multiplier}, tp={price}")
                         else:
                             # Fallback to regular calculation if stop_size not found
                             logging.warning(f"Custom entry OTH TP (LONG): stop_size not found in orderStatusData, using fallback calculation")
                             price = get_tp_for_selling(connection,entryData['timeFrame'],entryData['contract'], entryData['profit'], entry_stop_price, histData)
-                # Check if this is a Limit Order or Custom entry with ATR stop loss - use same ATR stop_size for TP
-                elif (entryData['barType'] == Config.entryTradeType[0] or entryData['barType'] == 'Custom') and entryData.get('stopLoss') in Config.atrStopLossMap:
+                # Check if this is a Limit Order, ASK + 1/2, BID - 1/2, or Custom entry with ATR stop loss - use same ATR stop_size for TP
+                elif (_is_limit_style_entry(entryData['barType']) or entryData['barType'] == 'Custom') and entryData.get('stopLoss') in Config.atrStopLossMap:
                     # Use same stop_size as stop loss so TP = entry + 3*stop_size matches actual risk (e.g. 695.16 not 695.13)
                     # Derive stop_size from the SL price we will use (same as get_sl_for_selling) so TP and SL are consistent
                     sl_price = get_sl_for_selling(connection, entryData['stopLoss'], entry_stop_price, histData, entryData.get('slValue'), entryData['contract'], entryData['timeFrame'], chart_Time)
