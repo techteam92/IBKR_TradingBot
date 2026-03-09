@@ -96,11 +96,12 @@ class connection:
             # Actually, the original logic was checking if barType != entryTradeType[0] to exclude FB
             # But since entryTradeType now starts with manualOrderTypes, we need different logic
             
-            # For manual orders: send TP/SL only in extended hours (not in regular hours where bracket orders are used)
+            # For manual orders: send TP/SL in extended hours, or for Custom+LOD/HOD in RTH (Custom LOD/HOD places entry only, no bracket)
             # For other trade types: send TP/SL (except FB and PBe1 which use bracket orders in regular hours)
             if is_manual_order:
-                # Manual orders: only send TP/SL in extended hours
-                should_send_tp_sl = is_extended_hours
+                stop_loss_type = data.get('stopLoss', '')
+                is_custom_lod_hod = (bar_type == 'Custom' and len(Config.stopLoss) > 4 and stop_loss_type in (Config.stopLoss[3], Config.stopLoss[4]))  # HOD, LOD
+                should_send_tp_sl = is_extended_hours or is_custom_lod_hod
             else:
                 # Other trade types: send TP/SL (except FB, Conditional Order, RB, RBB, and PBe1 which use bracket orders in regular hours)
                 # Since entryTradeType = manualOrderTypes + ['Conditional Order', 'FB', ...], FB is at index 3
@@ -1052,7 +1053,8 @@ class connection:
             oldRow = None
             historical = {}
             i=0
-            configTime = configTime.time().replace(microsecond=0)
+            if configTime is not None:
+                configTime = configTime.time().replace(microsecond=0)
 
             # for x in range(Config.pullBackNo + 1):
             #     no = (i - (x + 1))
@@ -1188,29 +1190,35 @@ class connection:
             nest_asyncio.apply()
             logging.info("we are getting chart date of %s time and for %s time frame and  for %s contract ",configTime,timeFrame,ibcontract)
             histData = self.getChartData(ibcontract,timeFrame,configTime)
-            if(len(histData) == 0):
+            if len(histData) == 0:
                 logging.debug("historical data not found for %s contract , time frame %s, time %s",ibcontract,timeFrame,configTime)
                 return {}
 
-            oldRow=None
-            historical ={}
-            configTimeAsTime = configTime.time().replace(microsecond=0).replace(second=0)
             today = datetime.datetime.now().date()
-            lastBarFromToday = None  # fallback: most recent completed bar from today
+            # Prefer the most recent *completed* bar for RBB entry so entry trigger is not far from current price.
+            # histData is chronological; the last bar is often the current (incomplete) bar, so use the
+            # second-to-last bar as the previous completed bar when we have at least 2 bars.
+            if len(histData) >= 2:
+                prev_completed = histData[-2]
+                if prev_completed.date.date() == today:
+                    historical = {"close": prev_completed.close, "open": prev_completed.open, "high": prev_completed.high, "low": prev_completed.low, "dateTime": prev_completed.date}
+                    logging.info("RBB: using most recent completed bar (second-to-last) for entry: dateTime=%s high=%s low=%s", prev_completed.date, prev_completed.high, prev_completed.low)
+                    return historical
+            # Fallback: exact configTime match or last bar from today
+            historical = {}
+            configTimeAsTime = configTime.time().replace(microsecond=0).replace(second=0)
+            lastBarFromToday = None
             for data in histData:
-                chart_date = data.date.date()
-                if chart_date == today:
+                if data.date.date() == today:
                     lastBarFromToday = data
-                if (today == chart_date) and (data.date.time().replace(microsecond=0).replace(second=0) == configTimeAsTime):
-                    logging.debug("we are adding this row in historical %s   {For %s contract }",data,ibcontract)
-                    historical = {"close": data.close, "open": data.open, "high": data.high, "low": data.low,"dateTime":data.date}
+                if (today == data.date.date()) and (data.date.time().replace(microsecond=0).replace(second=0) == configTimeAsTime):
+                    logging.debug("we are adding this row in historical %s   {For %s contract }", data, ibcontract)
+                    historical = {"close": data.close, "open": data.open, "high": data.high, "low": data.low, "dateTime": data.date}
                     break
-                oldRow = data
-            # When no bar exactly matches configTime (e.g. current bar not yet complete), use most recent completed bar from today
             if not historical and lastBarFromToday is not None:
-                historical = {"close": lastBarFromToday.close, "open": lastBarFromToday.open, "high": lastBarFromToday.high, "low": lastBarFromToday.low,"dateTime":lastBarFromToday.date}
-                logging.debug("RBB: no exact bar for %s; using last completed bar from today %s for %s", configTimeAsTime, lastBarFromToday.date, ibcontract)
-            logging.info("historical data found %s ",historical)
+                historical = {"close": lastBarFromToday.close, "open": lastBarFromToday.open, "high": lastBarFromToday.high, "low": lastBarFromToday.low, "dateTime": lastBarFromToday.date}
+                logging.debug("RBB: no exact bar for %s; using last bar from today %s for %s", configTimeAsTime, lastBarFromToday.date, ibcontract)
+            logging.info("historical data found %s ", historical)
             return historical
         except Exception as e:
             logging.error('getHistoricalData ' + str(e))

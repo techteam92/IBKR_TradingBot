@@ -35,7 +35,8 @@ rowPosition=0
 buttonRely=0.3
 addButton = None
 IbConn = None
-scrollable_frame=None
+scrollable_frame = None
+scroll_canvas = None  # Canvas that contains scrollable_frame; used to scroll to bottom after Execute
 
 def _show_entry_price_modal(trade_type_combo, entry_points_entry, order_type_name):
     """
@@ -408,28 +409,161 @@ def getScrollableframe(frame):
     container = Frame(frame)
     container.pack(fill=BOTH, expand=True)
 
-    canvas = Canvas(container, highlightthickness=0)
-    canvas.pack(side=LEFT, fill=BOTH, expand=True)
+    global scroll_canvas
+    scroll_canvas = Canvas(container, highlightthickness=0)
+    scroll_canvas.pack(side=LEFT, fill=BOTH, expand=True)
 
-    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=scroll_canvas.yview)
     scrollbar.pack(side=RIGHT, fill=Y)
 
-    canvas.configure(yscrollcommand=scrollbar.set)
+    scroll_canvas.configure(yscrollcommand=scrollbar.set)
 
     global scrollable_frame
-    scrollable_frame = ttk.Frame(canvas)
+    scrollable_frame = ttk.Frame(scroll_canvas)
 
     scrollable_frame.bind(
         "<Configure>",
-        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        lambda e: scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
     )
 
-    canvas_frame = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas_frame = scroll_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
     def _resize_canvas(event):
-        canvas.itemconfig(canvas_frame, width=event.width)
+        scroll_canvas.itemconfig(canvas_frame, width=event.width)
 
-    canvas.bind("<Configure>", _resize_canvas)
+    scroll_canvas.bind("<Configure>", _resize_canvas)
+
+def _get_active_row_index():
+    """Return the row index to apply hotkey settings to (last row, or 0 if none)."""
+    if not symbol:
+        return -1
+    return len(symbol) - 1
+
+
+def _setup_hotkeys(root):
+    """
+    Bind hotkeys to the root window. Settings apply to the active row (last row).
+    HOT KEYS:
+      SHIFT+ENTER = Execute
+      Stop Loss: SHIFT+S=Custom, SHIFT+L=LOD, SHIFT+H=HOD, SHIFT+1/2/3/4 = 10/20/25/33% ATR
+      Trade Type: ALT+E=Custom, ALT+A=Ask+.05, ALT+B=Bid-.05, ALT+F=FB, ALT+L=Last Bar (LB),
+                  ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
+      Time Frame: CTRL+1/2/3/5/6/7 = 1/2/3/5/10/15 min
+      Profit: ALT+1/2/3 = 1:1, 2:1, 3:1
+      Time: SHIFT+O=OTH, SHIFT+D=DAY
+    """
+    def apply_stop_loss(idx, config_index):
+        if idx < 0 or idx >= len(stopLoss):
+            return
+        stopLoss[idx].current(config_index)
+        if idx < len(stopLossValue):
+            _update_stop_loss_value_field(stopLoss[idx], stopLossValue[idx], reset_value=True)
+
+    def apply_trade_type(idx, config_index, entry_point_value=None, show_modal_if_custom=True):
+        if idx < 0 or idx >= len(tradeType):
+            return
+        tradeType[idx].current(config_index)
+        if entry_point_value is not None and idx < len(entry_points):
+            entry_points[idx].delete(0, END)
+            entry_points[idx].insert(0, entry_point_value)
+        # When setting to Custom or Limit Order via hotkey, show the entry price modal (same as when user selects from dropdown)
+        if show_modal_if_custom and idx < len(entry_points):
+            sel = Config.entryTradeType[config_index] if 0 <= config_index < len(Config.entryTradeType) else ""
+            if sel == "Custom":
+                _show_entry_price_modal(tradeType[idx], entry_points[idx], "Custom")
+            elif sel == "Limit Order" and entry_point_value is None:
+                _show_entry_price_modal(tradeType[idx], entry_points[idx], "Limit Order")
+            elif sel == "Conditional Order":
+                _show_conditional_order_modal(tradeType[idx], entry_points[idx], "Conditional Order")
+
+    def apply_time_frame(idx, config_index):
+        if idx < 0 or idx >= len(timeFrame):
+            return
+        timeFrame[idx].current(config_index)
+
+    def apply_profit(idx, config_index):
+        if idx < 0 or idx >= len(takeProfit):
+            return
+        takeProfit[idx].current(config_index)
+
+    def apply_tif(idx, config_index):
+        if idx < 0 or idx >= len(timeInForce):
+            return
+        timeInForce[idx].current(config_index)
+
+    def execute_active(event=None):
+        idx = _get_active_row_index()
+        if idx >= 0:
+            execute_row(idx)
+        return "break"
+
+    def on_key(handler):
+        def f(event):
+            idx = _get_active_row_index()
+            if idx >= 0:
+                handler(idx)
+            return "break"
+        return f
+
+    # Execute: SHIFT+ENTER
+    root.bind("<Shift-Return>", execute_active)
+
+    # Stop Loss: SHIFT+S=Custom(1), SHIFT+L=LOD(4), SHIFT+H=HOD(3), SHIFT+1/2/3/4 = 10/20/25/33% ATR (5,6,7,8)
+    root.bind("<Shift-s>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
+    root.bind("<Shift-S>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
+    root.bind("<Shift-l>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("LOD"))))
+    root.bind("<Shift-L>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("LOD"))))
+    root.bind("<Shift-h>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("HOD"))))
+    root.bind("<Shift-H>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("HOD"))))
+    # Shift+number: on Windows Tk sends the shifted character keysym (! @ # $), not "1" "2" "3" "4"
+    root.bind("<Shift-exclam>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("10% ATR"))))   # Shift+1
+    root.bind("<Shift-at>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("20% ATR"))))     # Shift+2
+    root.bind("<Shift-numbersign>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("25% ATR"))))  # Shift+3
+    root.bind("<Shift-dollar>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("33% ATR"))))  # Shift+4
+
+    # Trade Type: ALT+E=Custom, ALT+A=Ask+.05, ALT+B=Bid-.05, ALT+F=FB, ALT+L=Last Bar (LB), ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
+    root.bind("<Alt-e>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
+    root.bind("<Alt-E>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
+    root.bind("<Alt-a>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "0.05")))
+    root.bind("<Alt-A>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "0.05")))
+    root.bind("<Alt-b>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "-0.05")))
+    root.bind("<Alt-B>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"), "-0.05")))
+    root.bind("<Alt-f>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("FB"))))
+    root.bind("<Alt-F>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("FB"))))
+    root.bind("<Alt-l>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("LB"))))
+    root.bind("<Alt-L>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("LB"))))
+    root.bind("<Alt-r>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("RBB"))))
+    root.bind("<Alt-R>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("RBB"))))
+    root.bind("<Alt-p>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("PBe1"))))
+    root.bind("<Alt-P>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("PBe1"))))
+    root.bind("<Control-p>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("PBe2"))))
+    root.bind("<Control-P>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("PBe2"))))
+    root.bind("<Control-l>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"))))
+    root.bind("<Control-L>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"))))
+    root.bind("<Control-c>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Conditional Order"))))
+    root.bind("<Control-C>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Conditional Order"))))
+
+    # Time Frame: CTRL+1=1min(0), CTRL+2=2min(1), CTRL+3=3min(2), CTRL+5=5min(3), CTRL+6=10min(4), CTRL+7=15min(5)
+    root.bind("<Control-Key-1>", on_key(lambda i: apply_time_frame(i, 0)))
+    root.bind("<Control-Key-2>", on_key(lambda i: apply_time_frame(i, 1)))
+    root.bind("<Control-Key-3>", on_key(lambda i: apply_time_frame(i, 2)))
+    root.bind("<Control-Key-5>", on_key(lambda i: apply_time_frame(i, 3)))
+    root.bind("<Control-Key-6>", on_key(lambda i: apply_time_frame(i, 4)))
+    root.bind("<Control-Key-7>", on_key(lambda i: apply_time_frame(i, 5)))
+
+    # Profit: ALT+1=1:1(0), ALT+2=2:1(2), ALT+3=3:1(4)
+    root.bind("<Alt-Key-1>", on_key(lambda i: apply_profit(i, 0)))
+    root.bind("<Alt-Key-2>", on_key(lambda i: apply_profit(i, 2)))
+    root.bind("<Alt-Key-3>", on_key(lambda i: apply_profit(i, 4)))
+
+    # Time: SHIFT+O=OTH(1), SHIFT+D=DAY(0)
+    root.bind("<Shift-o>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("OTH"))))
+    root.bind("<Shift-O>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("OTH"))))
+    root.bind("<Shift-d>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("DAY"))))
+    root.bind("<Shift-D>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("DAY"))))
+
+    logging.info("Hotkeys bound: Shift+Enter=Execute, Shift+S/L/H/1-4=Stop Loss, Alt+E/A/B/F/L/R/P=Trade Type, Ctrl+P/L/C=Trade Type, Ctrl+1-7=Time Frame, Alt+1-3=Profit, Shift+O/D=Time")
+
 
 def NewTradeFrame(frame,connection):
     logging.debug("New Trade Frame Init")
@@ -451,6 +585,8 @@ def NewTradeFrame(frame,connection):
     addButton.pack( side = BOTTOM)
     # Log that all trading row elements are displayed (for debugging visibility, e.g. Option button)
     _log_ui_elements_displayed()
+    # Hotkeys: apply to active (last) row
+    _setup_hotkeys(frame)
     # addButtonbt.place(relx=0.5, rely=0.3, anchor=CENTER)
     # global managePositionButton
     # managePositionButton = Button(frame, width="15", height="1", text="Manage Position", command=openManagePosition)
@@ -649,6 +785,15 @@ def execute_row(row_index):
 
     # Add a new row after Execute so user can enter next trade
     addField(0, "")
+
+    # Scroll to bottom so the new row and status are visible
+    def _scroll_to_bottom():
+        global scroll_canvas
+        if scroll_canvas is not None:
+            scroll_canvas.update_idletasks()
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+            scroll_canvas.yview_moveto(1.0)
+    _scroll_to_bottom()
 
 
 def toggle_replay(row_index):
