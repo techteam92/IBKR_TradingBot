@@ -58,9 +58,9 @@ timeDictInMinute ={'1 min':1, '2 mins':2, '3 mins':3, '5 mins':5, '10 mins':10, 
 timeDict={'1 min':60, '2 mins':120, '3 mins':180, '5 mins':300, '10 mins':600, '15 mins':900, '20 mins':1200, '30 mins':1600, '1 hour':3600,
 '2 hours':7200, '3 hours':10800, '4 hours':14400}
 takeProfit=['1:1','1.5:1','2:1','2.5:1','3:1']
-stopLoss=['EntryBar','Custom','BarByBar' , 'HOD' , 'LOD','10% ATR','20% ATR','25% ATR','33% ATR','50% ATR']
+stopLoss=['EntryBar','Custom','BarByBar' , 'HOD' , 'LOD','15% ATR','20% ATR','25% ATR','33% ATR','50% ATR']
 atrStopLossMap = {
-'10% ATR':0.10,
+'15% ATR':0.15,
 '20% ATR':0.20,
 '25% ATR':0.25,
 '33% ATR':0.33,
@@ -73,6 +73,16 @@ timeInForce=['DAY','OTH','GTC']
 # pullbacj divide in two -------------  new pbe1 (close second trade)   new e2   old pbe1e2
 manualOrderTypes = ['Custom','Limit Order','ASK + 1/2','BID - 1/2']
 entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','LB','LB2','LB3']
+# Indices into entryTradeType for bar-based strategies (0-3 = manual types, 4+ = bar/conditional)
+CONDITIONAL_ORDER_INDEX = 4
+FB_INDEX = 5
+RB_INDEX = 6
+RBB_INDEX = 7
+PBe1_INDEX = 8
+PBe2_INDEX = 9
+LB_INDEX = 10
+LB2_INDEX = 11
+LB3_INDEX = 12
 buySell=['BUY','SELL']
 prePostBool=[False,True]
 breakEven =[False,True]

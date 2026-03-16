@@ -445,9 +445,10 @@ def _setup_hotkeys(root):
     Bind hotkeys to the root window. Settings apply to the active row (last row).
     HOT KEYS:
       SHIFT+ENTER = Execute
-      Stop Loss: SHIFT+S=Custom, SHIFT+L=LOD, SHIFT+H=HOD, SHIFT+1/2/3/4 = 10/20/25/33% ATR
-      Trade Type: ALT+E=Custom, ALT+A=ASK+1/2, ALT+B=BID-1/2, ALT+F=FB, ALT+L=Last Bar (LB),
+      Stop Loss: SHIFT+C=Custom, SHIFT+L=LOD, SHIFT+H=HOD, SHIFT+1/2/3/4 = 15/20/25/33% ATR
+      Trade Type: ALT+C=Custom entry, ALT+A=ASK+1/2, ALT+B=BID-1/2, ALT+F=FB, ALT+L=Last Bar (LB),
                   ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
+      Buy/Sell: CTRL+B=BUY, CTRL+S=SELL
       Time Frame: CTRL+1/2/3/5/6/7 = 1/2/3/5/10/15 min
       Profit: ALT+1/2/3 = 1:1, 2:1, 3:1
       Time: SHIFT+O=OTH, SHIFT+D=DAY
@@ -491,6 +492,11 @@ def _setup_hotkeys(root):
             return
         timeInForce[idx].current(config_index)
 
+    def apply_buy_sell(idx, config_index):
+        if idx < 0 or idx >= len(buySell):
+            return
+        buySell[idx].current(config_index)
+
     def execute_active(event=None):
         idx = _get_active_row_index()
         if idx >= 0:
@@ -508,22 +514,22 @@ def _setup_hotkeys(root):
     # Execute: SHIFT+ENTER
     root.bind("<Shift-Return>", execute_active)
 
-    # Stop Loss: SHIFT+S=Custom(1), SHIFT+L=LOD(4), SHIFT+H=HOD(3), SHIFT+1/2/3/4 = 10/20/25/33% ATR (5,6,7,8)
-    root.bind("<Shift-s>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
-    root.bind("<Shift-S>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
+    # Stop Loss: SHIFT+C=Custom(1), SHIFT+L=LOD(4), SHIFT+H=HOD(3), SHIFT+1/2/3/4 = 15/20/25/33% ATR (5,6,7,8)
+    root.bind("<Shift-c>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
+    root.bind("<Shift-C>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
     root.bind("<Shift-l>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("LOD"))))
     root.bind("<Shift-L>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("LOD"))))
     root.bind("<Shift-h>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("HOD"))))
     root.bind("<Shift-H>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("HOD"))))
     # Shift+number: on Windows Tk sends the shifted character keysym (! @ # $), not "1" "2" "3" "4"
-    root.bind("<Shift-exclam>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("10% ATR"))))   # Shift+1
+    root.bind("<Shift-exclam>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("15% ATR"))))   # Shift+1
     root.bind("<Shift-at>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("20% ATR"))))     # Shift+2
     root.bind("<Shift-numbersign>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("25% ATR"))))  # Shift+3
     root.bind("<Shift-dollar>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("33% ATR"))))  # Shift+4
 
-    # Trade Type: ALT+E=Custom, ALT+A=Ask+.05, ALT+B=Bid-.05, ALT+F=FB, ALT+L=Last Bar (LB), ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
-    root.bind("<Alt-e>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
-    root.bind("<Alt-E>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
+    # Trade Type: ALT+C=Custom entry, ALT+A=Ask+.05, ALT+B=Bid-.05, ALT+F=FB, ALT+L=Last Bar (LB), ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
+    root.bind("<Alt-c>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
+    root.bind("<Alt-C>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Custom"))))
     root.bind("<Alt-a>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("ASK + 1/2"))))
     root.bind("<Alt-A>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("ASK + 1/2"))))
     root.bind("<Alt-b>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("BID - 1/2"))))
@@ -542,6 +548,12 @@ def _setup_hotkeys(root):
     root.bind("<Control-L>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Limit Order"))))
     root.bind("<Control-c>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Conditional Order"))))
     root.bind("<Control-C>", on_key(lambda i: apply_trade_type(i, Config.entryTradeType.index("Conditional Order"))))
+
+    # Buy/Sell: CTRL+B=BUY(0), CTRL+S=SELL(1)
+    root.bind("<Control-b>", on_key(lambda i: apply_buy_sell(i, Config.buySell.index("BUY"))))
+    root.bind("<Control-B>", on_key(lambda i: apply_buy_sell(i, Config.buySell.index("BUY"))))
+    root.bind("<Control-s>", on_key(lambda i: apply_buy_sell(i, Config.buySell.index("SELL"))))
+    root.bind("<Control-S>", on_key(lambda i: apply_buy_sell(i, Config.buySell.index("SELL"))))
 
     # Time Frame: CTRL+1=1min(0), CTRL+2=2min(1), CTRL+3=3min(2), CTRL+5=5min(3), CTRL+6=10min(4), CTRL+7=15min(5)
     root.bind("<Control-Key-1>", on_key(lambda i: apply_time_frame(i, 0)))
@@ -562,7 +574,7 @@ def _setup_hotkeys(root):
     root.bind("<Shift-d>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("DAY"))))
     root.bind("<Shift-D>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("DAY"))))
 
-    logging.info("Hotkeys bound: Shift+Enter=Execute, Shift+S/L/H/1-4=Stop Loss, Alt+E/A/B/F/L/R/P=Trade Type, Ctrl+P/L/C=Trade Type, Ctrl+1-7=Time Frame, Alt+1-3=Profit, Shift+O/D=Time")
+    logging.info("Hotkeys bound: Shift+Enter=Execute, Shift+C=Custom stop, Shift+L/H/1-4=Stop Loss, Alt+C=Custom entry, Alt+A/B/F/L/R/P=Trade Type, Ctrl+P/L/C=Trade Type, Ctrl+B=BUY, Ctrl+S=SELL, Ctrl+1-7=Time Frame, Alt+1-3=Profit, Shift+O/D=Time")
 
 
 def NewTradeFrame(frame,connection):
