@@ -103,26 +103,65 @@ class connection:
                 is_custom_lod_hod = (bar_type == 'Custom' and len(Config.stopLoss) > 4 and stop_loss_type in (Config.stopLoss[3], Config.stopLoss[4]))  # HOD, LOD
                 should_send_tp_sl = is_extended_hours or is_custom_lod_hod
             else:
-                # Other trade types: send TP/SL (except FB, Conditional Order, RB, RBB, and PBe1 which use bracket orders in regular hours)
-                # Since entryTradeType = manualOrderTypes + ['Conditional Order', 'FB', ...], FB is at index 3
-                # manualOrderTypes = ['Stop Order', 'Limit Order'] (indices 0, 1)
-                # entryTradeType[2] = 'Conditional Order', entryTradeType[3] = 'FB', entryTradeType[4] = 'RB', entryTradeType[5] = 'RBB', entryTradeType[6] = 'PBe1'
-                conditional_order_index = 2
-                fb_index = 3
-                rb_index = 4
-                rbb_index = 5
-                pbe1_index = 6
-                pbe2_index = 7
+                # Other trade types: send TP/SL (except FB, Conditional Order, RB in RTH)
+                # Use indices from Config to stay in sync with entryTradeType definition.
+                conditional_order_index = getattr(Config, "CONDITIONAL_ORDER_INDEX", None)
+                fb_index = getattr(Config, "FB_INDEX", None)
+                rb_index = getattr(Config, "RB_INDEX", None)
+                rbb_index = getattr(Config, "RBB_INDEX", None)
+                pbe1_index = getattr(Config, "PBe1_INDEX", None)
+                pbe2_index = getattr(Config, "PBe2_INDEX", None)
+                pbe1_3_index = getattr(Config, "PBe1_3_INDEX", None)
+                pbe2_3_index = getattr(Config, "PBe2_3_INDEX", None)
+                lb_index = getattr(Config, "LB_INDEX", None)
+                lb2_index = getattr(Config, "LB2_INDEX", None)
+                lb3_index = getattr(Config, "LB3_INDEX", None)
+
                 # Exclude FB, Conditional Order, and RB in regular hours (they use bracket orders)
                 # Conditional Order uses bracket orders in RTH (like Custom entry), but needs sendTpAndSl in extended hours
-                # RBB, PBe1, and PBe2 place only entry order in RTH; TP/SL and option (if enabled) sent after fill
+                # RBB, PBe1, and PBe2 (and their 3‑bar variants) place only entry order in RTH; TP/SL and option sent after fill
                 # In extended hours, RB and RBB still need sendTpAndSl (don't use bracket orders)
-                is_conditional_order = bar_type == Config.entryTradeType[conditional_order_index] if len(Config.entryTradeType) > conditional_order_index else False
-                is_fb = bar_type == Config.entryTradeType[fb_index]
-                is_rb = bar_type == Config.entryTradeType[rb_index] if len(Config.entryTradeType) > rb_index else False
-                is_rbb = bar_type == Config.entryTradeType[rbb_index] if len(Config.entryTradeType) > rbb_index else False
-                is_pbe1 = bar_type == Config.entryTradeType[pbe1_index] if len(Config.entryTradeType) > pbe1_index else False
-                is_pbe2 = bar_type == Config.entryTradeType[pbe2_index] if len(Config.entryTradeType) > pbe2_index else False
+                is_conditional_order = (
+                    conditional_order_index is not None
+                    and 0 <= conditional_order_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[conditional_order_index]
+                )
+                is_fb = (
+                    fb_index is not None
+                    and 0 <= fb_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[fb_index]
+                )
+                is_rb = (
+                    rb_index is not None
+                    and 0 <= rb_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[rb_index]
+                )
+                is_rbb = (
+                    rbb_index is not None
+                    and 0 <= rbb_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[rbb_index]
+                )
+                is_pbe1 = (
+                    pbe1_index is not None
+                    and 0 <= pbe1_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[pbe1_index]
+                )
+                is_pbe2 = (
+                    pbe2_index is not None
+                    and 0 <= pbe2_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[pbe2_index]
+                )
+                # Treat PBe1 (3) / PBe2 (3) the same as PBe1 / PBe2 for TP/SL routing
+                is_pbe1_3 = (
+                    pbe1_3_index is not None
+                    and 0 <= pbe1_3_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[pbe1_3_index]
+                )
+                is_pbe2_3 = (
+                    pbe2_3_index is not None
+                    and 0 <= pbe2_3_index < len(Config.entryTradeType)
+                    and bar_type == Config.entryTradeType[pbe2_3_index]
+                )
                 if is_conditional_order:
                     should_send_tp_sl = is_extended_hours  # Conditional Order uses bracket orders in RTH, separate orders in extended hours
                 elif is_fb:
@@ -131,18 +170,27 @@ class connection:
                     should_send_tp_sl = is_extended_hours  # RB uses bracket orders in RTH, separate orders in extended hours
                 elif is_rbb:
                     should_send_tp_sl = True  # RBB places only entry order in RTH, TP/SL sent after fill
-                elif is_pbe1:
-                    should_send_tp_sl = True  # PBe1 places only entry order in RTH (like RBB), TP/SL and option after fill
-                elif is_pbe2:
-                    should_send_tp_sl = True  # PBe2 same as PBe1: option entry only after stock entry fills (like PBe1+Replay, no PBe1 orders)
+                elif is_pbe1 or is_pbe1_3:
+                    should_send_tp_sl = True  # PBe1/PBe1 (3): entry only in RTH, TP/SL and option after fill
+                elif is_pbe2 or is_pbe2_3:
+                    should_send_tp_sl = True  # PBe2/PBe2 (3): same as PBe1
                 else:
                     # Check if this is LB, LB2, or LB3
-                    lb_index = 8
-                    lb2_index = 9
-                    lb3_index = 10
-                    is_lb = bar_type == Config.entryTradeType[lb_index] if len(Config.entryTradeType) > lb_index else False
-                    is_lb2 = bar_type == Config.entryTradeType[lb2_index] if len(Config.entryTradeType) > lb2_index else False
-                    is_lb3 = bar_type == Config.entryTradeType[lb3_index] if len(Config.entryTradeType) > lb3_index else False
+                    is_lb = (
+                        lb_index is not None
+                        and 0 <= lb_index < len(Config.entryTradeType)
+                        and bar_type == Config.entryTradeType[lb_index]
+                    )
+                    is_lb2 = (
+                        lb2_index is not None
+                        and 0 <= lb2_index < len(Config.entryTradeType)
+                        and bar_type == Config.entryTradeType[lb2_index]
+                    )
+                    is_lb3 = (
+                        lb3_index is not None
+                        and 0 <= lb3_index < len(Config.entryTradeType)
+                        and bar_type == Config.entryTradeType[lb3_index]
+                    )
                     if is_lb or is_lb2 or is_lb3:
                         should_send_tp_sl = is_extended_hours  # LB/LB2/LB3 use bracket orders in RTH, separate orders in extended hours
                     else:

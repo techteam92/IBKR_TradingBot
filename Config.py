@@ -72,7 +72,7 @@ timeInForce=['DAY','OTH','GTC']
 # recet bar [rb, recent bar BY Bar]
 # pullbacj divide in two -------------  new pbe1 (close second trade)   new e2   old pbe1e2
 manualOrderTypes = ['Custom','Limit Order','ASK + 1/2','BID - 1/2']
-entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','LB','LB2','LB3']
+entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','LB','LB2','LB3','PBe1 (3)','PBe2 (3)']
 # Indices into entryTradeType for bar-based strategies (0-3 = manual types, 4+ = bar/conditional)
 CONDITIONAL_ORDER_INDEX = 4
 FB_INDEX = 5
@@ -83,6 +83,8 @@ PBe2_INDEX = 9
 LB_INDEX = 10
 LB2_INDEX = 11
 LB3_INDEX = 12
+PBe1_3_INDEX = 13   # PBe1 with 3 consecutive green (long) or red (short) bars required
+PBe2_3_INDEX = 14   # PBe2 with 3 consecutive green (long) or red (short) bars required
 buySell=['BUY','SELL']
 prePostBool=[False,True]
 breakEven =[False,True]

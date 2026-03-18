@@ -2102,42 +2102,65 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
         # Generate entry order ID
         parent_order_id = connection.get_next_order_id()
         
-        # For LOD/HOD: Always use STP order in all sessions
+        # For LOD/HOD:
+        # - RTH: STP entry is fine
+        # - Extended hours (premarket/after-hours): MUST use STP LMT (stop orders may not execute reliably)
         if is_lod_hod:
-            # Entry order as STP (Stop Order) for all sessions
             # entry_stop_price is already calculated in the is_lod_hod block above
+            entry_order_type = "STP LMT" if is_extended else "STP"
+            entry_limit_price = None
+            if is_extended:
+                # Use a conservative limit around stop price so the order can fill in extended hours
+                entry_limit_offset = round(max(0.01, float(stop_size) * 0.5), Config.roundVal)
+                if buySellType == 'BUY':
+                    entry_limit_price = round(float(entry_stop_price) + entry_limit_offset, Config.roundVal)
+                else:
+                    entry_limit_price = round(float(entry_stop_price) - entry_limit_offset, Config.roundVal)
+
             entry_order = Order(
                 orderId=parent_order_id,
-                orderType="STP",
+                orderType=entry_order_type,
                 action=buySellType,
                 totalQuantity=qty,
                 auxPrice=entry_stop_price,
+                lmtPrice=entry_limit_price if is_extended else None,
                 tif=tif,
                 transmit=True  # Transmit immediately - TP/SL will be sent after fill
             )
-            
+
             try:
-                logging.info("Placing LOD/HOD STP order: orderId=%s, orderType=STP, action=%s, quantity=%s, auxPrice=%s, tif=%s, outsideRth=%s",
-                            parent_order_id, buySellType, qty, entry_stop_price, tif, outsideRth)
+                if is_extended:
+                    logging.info(
+                        "Placing LOD/HOD %s order: orderId=%s, action=%s, qty=%s, stop=%s, limit=%s, tif=%s, outsideRth=%s",
+                        entry_order_type, parent_order_id, buySellType, qty, entry_stop_price, entry_limit_price, tif, outsideRth
+                    )
+                else:
+                    logging.info(
+                        "Placing LOD/HOD %s order: orderId=%s, action=%s, qty=%s, stop=%s, tif=%s, outsideRth=%s",
+                        entry_order_type, parent_order_id, buySellType, qty, entry_stop_price, tif, outsideRth
+                    )
                 entry_response = connection.placeTrade(contract=contract, order=entry_order, outsideRth=outsideRth, trade_type=barType)
                 if entry_response is None:
-                    logging.error("placeTrade returned None for LOD/HOD STP order %s", symbol)
+                    logging.error("placeTrade returned None for LOD/HOD %s order %s", entry_order_type, symbol)
                     return
-                logging.info("placeTrade successful: orderId=%s, status=%s", 
-                            entry_response.order.orderId, entry_response.orderStatus.status)
-                StatusUpdate(entry_response, 'Entry', contract, 'STP', buySellType, qty, histData, entry_stop_price, symbol,
+                logging.info("placeTrade successful: orderId=%s, status=%s",
+                             entry_response.order.orderId, entry_response.orderStatus.status)
+                StatusUpdate(entry_response, 'Entry', contract, entry_order_type, buySellType, qty, histData, entry_stop_price, symbol,
                              timeFrame, profit, stopLoss, risk, '', tif, barType, buySellType, atrPercentage, slValue,
                              breakEven, outsideRth, False, entry_points)
-                
-                # Store stop_size and stop_loss_price in orderStatusData
+
+                # Store stop_size and stop_loss_price in orderStatusData (used by TP/SL placement)
                 if int(entry_response.order.orderId) in Config.orderStatusData:
                     Config.orderStatusData[int(entry_response.order.orderId)]['stopSize'] = stop_size
                     Config.orderStatusData[int(entry_response.order.orderId)]['stopLossPrice'] = stop_loss_price
-                    logging.info(f"Stored stop_size={stop_size}, stop_loss_price={stop_loss_price} in orderStatusData for LOD/HOD order {entry_response.order.orderId}")
-                
-                logging.info("LOD/HOD: Entry STP order placed. TP and SL will be sent automatically after entry fills.")
+                    logging.info(
+                        "Stored stop_size=%s, stop_loss_price=%s in orderStatusData for LOD/HOD order %s",
+                        stop_size, stop_loss_price, entry_response.order.orderId
+                    )
+
+                logging.info("LOD/HOD: Entry %s order placed. TP and SL will be sent automatically after entry fills.", entry_order_type)
             except Exception as place_error:
-                logging.error("Error placing LOD/HOD STP order for %s: %s", symbol, place_error)
+                logging.error("Error placing LOD/HOD %s order for %s: %s", entry_order_type, symbol, place_error)
                 logging.error("Traceback: %s", traceback.format_exc())
                 raise
             return  # Exit early for LOD/HOD
@@ -3047,7 +3070,34 @@ def pbe1_result(price,hist_data,reverse = False):
         logging.error(f"error in pbeCheck {traceback.format_exc()}")
     return  "" , None
 
-async def pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue,breakEven,outsideRth,entry_points):
+
+def _pbe_has_3_consecutive_bars(complete_bar_data, buy_sell_type):
+    """
+    Return True if the last 3 completed bars are 3 consecutive green (for BUY/long)
+    or 3 consecutive red (for SELL/short). Green = close > open, Red = close < open.
+    complete_bar_data is dict keyed 0,1,2,...; last bar (highest index) is current forming,
+    so last 3 completed bars are indices len-4, len-3, len-2.
+    """
+    n = len(complete_bar_data)
+    if n < 4:
+        return False
+    indices = [n - 4, n - 3, n - 2]
+    for i in indices:
+        bar = complete_bar_data.get(i)
+        if not bar or 'open' not in bar or 'close' not in bar:
+            return False
+        o, c = float(bar['open']), float(bar['close'])
+        green = c > o
+        if buy_sell_type == 'BUY':
+            if not green:
+                return False
+        else:  # SELL
+            if green:  # need red (close < open)
+                return False
+    return True
+
+
+async def pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue,breakEven,outsideRth,entry_points, require_3_consecutive_bars=False):
         logging.info("pull_back_PBe1 mkt pbe1 trade is sending. %s %s",Config.tradingTime,symbol)
         ibContract = getContract(symbol, None)
         # priceObj = subscribePrice(ibContract, connection)
@@ -3079,6 +3129,18 @@ async def pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
                     logging.info("last 1 record not found we will try after 1 sec.")
                     await  asyncio.sleep(1)
                     continue
+
+                # PBe1 (3): require 3 consecutive green bars (long) or 3 red bars (short) before triggering
+                if require_3_consecutive_bars:
+                    if len(complete_bar_data) < 4:
+                        logging.info("PBe1 (3): need at least 4 bars for 3 completed, have %s; waiting...", len(complete_bar_data))
+                        await asyncio.sleep(1)
+                        continue
+                    if not _pbe_has_3_consecutive_bars(complete_bar_data, buySellType):
+                        logging.info("PBe1 (3): 3 consecutive %s bars not yet met; waiting...", "green" if buySellType == 'BUY' else "red")
+                        await asyncio.sleep(1)
+                        continue
+                    logging.info("PBe1 (3): 3 consecutive %s bars condition met; triggering PBe1", "green" if buySellType == 'BUY' else "red")
 
                 # logging.info("RecentBar for PullBack E1 %s ",recentBarData)
                 tradeType = ""
@@ -3815,7 +3877,7 @@ async def lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
         break
 
 
-async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth):
+async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth, require_3_consecutive_bars=False):
     """
     PBe2 logic (aligned with real PBe1 — same bar and direction, no extra condition):
     - The PBe1 leg in PBe2 is for CALCULATION ONLY — no real PBe1 order is placed.
@@ -3864,6 +3926,18 @@ async def pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,b
             logging.info("PBe2: last 1 record not found for PBe1 simulation, will try after 1 sec.")
             await asyncio.sleep(1)
             continue
+
+        # PBe2 (3): require 3 consecutive green bars (long) or 3 red bars (short) before triggering
+        if require_3_consecutive_bars:
+            if len(complete_bar_data) < 4:
+                logging.info("PBe2 (3): need at least 4 bars for 3 completed, have %s; waiting...", len(complete_bar_data))
+                await asyncio.sleep(1)
+                continue
+            if not _pbe_has_3_consecutive_bars(complete_bar_data, buySellType):
+                logging.info("PBe2 (3): 3 consecutive %s bars not yet met; waiting...", "green" if buySellType == 'BUY' else "red")
+                await asyncio.sleep(1)
+                continue
+            logging.info("PBe2 (3): 3 consecutive %s bars condition met; triggering PBe2", "green" if buySellType == 'BUY' else "red")
         
         # Use the same bar selection logic as PBe1 (second-to-last bar if available)
         if len(complete_bar_data) >= 2:
@@ -5320,7 +5394,8 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
                 # Allow RB/RBB, Conditional Order, manual order types, and PBe1/PBe2
                 allowed_types = (Config.entryTradeType[Config.CONDITIONAL_ORDER_INDEX],  # Conditional Order
                                 Config.entryTradeType[Config.RB_INDEX], Config.entryTradeType[Config.RBB_INDEX],  # RB, RBB
-                                Config.entryTradeType[Config.PBe1_INDEX], Config.entryTradeType[Config.PBe2_INDEX]) + MANUAL_ORDER_TYPES  # PBe1, PBe2
+                                Config.entryTradeType[Config.PBe1_INDEX], Config.entryTradeType[Config.PBe2_INDEX],
+                                Config.entryTradeType[Config.PBe1_3_INDEX], Config.entryTradeType[Config.PBe2_3_INDEX]) + MANUAL_ORDER_TYPES  # PBe1, PBe2, PBe1 (3), PBe2 (3)
                 logging.info("Session check: session=%s, barType='%s', allowed_types=%s, barType in allowed_types=%s", session, barType, allowed_types, barType in allowed_types)
                 if barType not in allowed_types:
                     logging.warning("%s session: Only Conditional Order, RB/RBB, PBe1/PBe2, or manual orders allowed; skipping barType %s", session, barType)
@@ -5381,12 +5456,67 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         elif barType == Config.entryTradeType[Config.RB_INDEX] or barType == Config.entryTradeType[Config.RBB_INDEX]:  # RB or RBB
             logging.debug("Routing to rb_and_rbb for barType='%s'", barType)
             await (rb_and_rbb(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
-        elif barType == Config.entryTradeType[Config.PBe1_INDEX]:  # PBe1
-            logging.debug("Routing to pull_back_PBe1 for barType='%s' (Config.entryTradeType[Config.PBe1_INDEX]='%s')", barType, Config.entryTradeType[Config.PBe1_INDEX])
-            await (pull_back_PBe1(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
-        elif barType == Config.entryTradeType[Config.PBe2_INDEX]:  # PBe2
-            logging.debug("Routing to pull_back_PBe2 for barType='%s' (Config.entryTradeType[Config.PBe2_INDEX]='%s')", barType, Config.entryTradeType[Config.PBe2_INDEX])
-            await (pull_back_PBe2(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth))
+        elif barType in (
+            Config.entryTradeType[Config.PBe1_INDEX],
+            Config.entryTradeType[Config.PBe1_3_INDEX],
+        ):  # PBe1 / PBe1 (3)
+            logging.debug(
+                "Routing to pull_back_PBe1 for barType='%s' (PBe1='%s', PBe1 (3)='%s')",
+                barType,
+                Config.entryTradeType[Config.PBe1_INDEX],
+                Config.entryTradeType[Config.PBe1_3_INDEX],
+            )
+            # PBe1 (3) uses the same logic as PBe1, but requires 3 consecutive bars
+            require_3_consecutive_bars = barType == Config.entryTradeType[Config.PBe1_3_INDEX]
+            await pull_back_PBe1(
+                connection,
+                symbol,
+                timeFrame,
+                profit,
+                stopLoss,
+                risk,
+                tif,
+                barType,
+                buySellType,
+                atrPercentage,
+                quantity,
+                pullBackNo,
+                slValue,
+                breakEven,
+                outsideRth,
+                entry_points,
+                require_3_consecutive_bars=require_3_consecutive_bars,
+            )
+        elif barType in (
+            Config.entryTradeType[Config.PBe2_INDEX],
+            Config.entryTradeType[Config.PBe2_3_INDEX],
+        ):  # PBe2 / PBe2 (3)
+            logging.debug(
+                "Routing to pull_back_PBe2 for barType='%s' (PBe2='%s', PBe2 (3)='%s')",
+                barType,
+                Config.entryTradeType[Config.PBe2_INDEX],
+                Config.entryTradeType[Config.PBe2_3_INDEX],
+            )
+            # PBe2 (3) uses the same logic as PBe2, but requires 3 consecutive bars
+            require_3_consecutive_bars = barType == Config.entryTradeType[Config.PBe2_3_INDEX]
+            await pull_back_PBe2(
+                connection,
+                symbol,
+                timeFrame,
+                profit,
+                stopLoss,
+                risk,
+                tif,
+                barType,
+                buySellType,
+                atrPercentage,
+                quantity,
+                pullBackNo,
+                slValue,
+                breakEven,
+                outsideRth,
+                require_3_consecutive_bars=require_3_consecutive_bars,
+            )
         elif barType == Config.entryTradeType[Config.LB_INDEX]:  # LB
             logging.debug("Routing to lb1 for barType='%s' (Config.entryTradeType[Config.LB_INDEX]='%s')", barType, Config.entryTradeType[Config.LB_INDEX])
             await (lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
@@ -6902,10 +7032,17 @@ async def sendTpSlBuy(connection, entryData):
                 logging.info(" Candle Data for takeProfit %s and contract is %s", candleData[-1], entryData['contract'])
 
                 # Check if stop loss is ATR-based or Custom - use same stop_size as entry and stop loss
-                # PBe1/PBe2: Always uses HOD/LOD for stop loss (similar to RBB+HOD/LOD)
+                # PBe1/PBe2 (including PBe1 (3)/PBe2 (3)): Always uses HOD/LOD for stop loss (similar to RBB+HOD/LOD)
                 stop_loss_type = entryData.get('stopLoss')
-                is_pbe1 = (entryData['barType'] == Config.entryTradeType[Config.PBe1_INDEX])  # PBe1
-                is_pbe2 = (entryData['barType'] == Config.entryTradeType[Config.PBe2_INDEX])  # PBe2
+                # Treat PBe1 (3) the same as PBe1, and PBe2 (3) the same as PBe2
+                is_pbe1 = entryData['barType'] in (
+                    Config.entryTradeType[Config.PBe1_INDEX],
+                    Config.entryTradeType[Config.PBe1_3_INDEX],
+                )
+                is_pbe2 = entryData['barType'] in (
+                    Config.entryTradeType[Config.PBe2_INDEX],
+                    Config.entryTradeType[Config.PBe2_3_INDEX],
+                )
                 is_pbe1_or_pbe2 = is_pbe1 or is_pbe2  # PBe1 or PBe2
                 is_lod_hod = (stop_loss_type == Config.stopLoss[3]) or (stop_loss_type == Config.stopLoss[4])  # HOD or LOD
                 
@@ -7424,6 +7561,37 @@ async def sendTpSlBuy(connection, entryData):
                     logging.error("Manual Order: Cannot calculate TP, skipping TP order. barType=%s, stopLoss=%s", 
                                 entryData.get('barType'), entryData.get('stopLoss'))
                     price = None
+                # Fallback TP for Limit-style entries (Limit Order / ASK + 1/2 / BID - 1/2) with ATR stop loss
+                # This covers cases where the earlier limit-style ATR TP branch did not run (e.g. unexpected control flow)
+                if (
+                    (price == 0 or price is None)
+                    and _is_limit_style_entry(entryData.get('barType'))
+                    and entryData.get('stopLoss') in Config.atrStopLossMap
+                ):
+                    atr_offset = _get_atr_stop_offset(connection, entryData['contract'], entryData.get('stopLoss'))
+                    if atr_offset is not None and atr_offset > 0 and entry_stop_price > 0:
+                        stop_size = atr_offset
+                        multiplier_map = {
+                            Config.takeProfit[0]: 1,    # 1:1
+                            Config.takeProfit[1]: 1.5,  # 1.5:1
+                            Config.takeProfit[2]: 2,    # 2:1
+                            Config.takeProfit[3]: 2.5,  # 2.5:1
+                        }
+                        if len(Config.takeProfit) > 4:
+                            multiplier_map[Config.takeProfit[4]] = 3  # 3:1
+                        multiplier = multiplier_map.get(entryData.get('profit'), 2.0)  # Default 2:1
+                        # For SHORT position (BUY TP): TP = entry - (multiplier × stop_size)
+                        price = float(entry_stop_price) - (multiplier * stop_size)
+                        price = round(price, Config.roundVal)
+                        logging.warning(
+                            "Manual Order Limit-style+ATR: Recalculated TP using fallback: entry=%s, stop_size=%s (ATR), multiplier=%s, tp=%s, barType=%s",
+                            entry_stop_price, stop_size, multiplier, price, entryData.get('barType')
+                        )
+                    else:
+                        logging.error(
+                            "Manual Order Limit-style+ATR: Cannot calculate fallback TP - atr_offset=%s, entry_stop_price=%s, barType=%s",
+                            atr_offset, entry_stop_price, entryData.get('barType')
+                        )
             
             # Skip TP send for PBe1/PBe2 - they already sent TP above
             is_pbe1 = (entryData['barType'] == Config.entryTradeType[Config.PBe1_INDEX])  # PBe1
@@ -7918,6 +8086,9 @@ def sendStopLoss(connection, entryData,price,action):
             raise ValueError(f"Invalid price parameter: {price}")
         
         order_type = "STP"
+        # Used for extended-hours STP LMT stop-loss legs.
+        # Must be initialized to avoid UnboundLocalError in paths that compute stop_size but forget limit_price.
+        limit_price = None
         # OCA group so TP and SL cancel each other; do NOT set parentId - entry is already filled,
         # so IB would reject with "Parent order is being cancelled." (Error 201)
         oca_id = entryData.get('orderId')
@@ -8570,6 +8741,21 @@ def sendStopLoss(connection, entryData,price,action):
             # For extended hours, use STP LMT (Stop-Limit Order) for stop loss
             # For RTH, use simple STP order (no limit price)
             if is_extended:
+                # Ensure limit_price is computed for extended hours. Some branches above may not set it.
+                if limit_price is None:
+                    if 'stop_size' not in locals() or stop_size is None or stop_size <= 0:
+                        stop_size = float(adjusted_price) * 0.01  # last-resort fallback
+                    limit_offset = round(float(stop_size) * EXTENDED_HOURS_SL_LIMIT_OFFSET_MULT, Config.roundVal)
+                    if action.upper() == "SELL":
+                        # LONG position stop-loss: limit below stop
+                        limit_price = round(float(adjusted_price) - limit_offset, Config.roundVal)
+                    else:
+                        # SHORT position stop-loss: limit above stop
+                        limit_price = round(float(adjusted_price) + limit_offset, Config.roundVal)
+                    logging.warning(
+                        "sendStopLoss: Computed missing limit_price for extended hours: action=%s stop=%s limit=%s (stop ± 3×stop_size=%s) barType=%s",
+                        action, adjusted_price, limit_price, limit_offset, entryData.get('barType', '')
+                    )
                 order_type = "STP LMT"
                 order_kwargs['orderType'] = "STP LMT"
                 order_kwargs['lmtPrice'] = round(limit_price, Config.roundVal)
@@ -8613,6 +8799,25 @@ def sendStopLoss(connection, entryData,price,action):
             logging.info(
                 "Extended hours fallback stop-limit: action=%s stop=%s limit=%s (stop ± 3×stop_size=%s) session=%s",
                 action, adjusted_price, order_kwargs['lmtPrice'], limit_offset, session
+            )
+
+        # Safety net: In extended hours we MUST place STP LMT.
+        # Some paths above compute stop_size but forget to set lmtPrice/orderType, which causes missing SL or UnboundLocalError.
+        if is_extended and 'lmtPrice' not in order_kwargs:
+            if 'stop_size' not in locals() or stop_size is None or stop_size <= 0:
+                # last-resort fallback: 1% of price
+                stop_size = float(order_kwargs['auxPrice']) * 0.01
+            limit_offset = round(float(stop_size) * EXTENDED_HOURS_SL_LIMIT_OFFSET_MULT, Config.roundVal)
+            if action.upper() == "SELL":
+                limit_price = round(float(order_kwargs['auxPrice']) - limit_offset, Config.roundVal)
+            else:
+                limit_price = round(float(order_kwargs['auxPrice']) + limit_offset, Config.roundVal)
+            order_type = "STP LMT"
+            order_kwargs['orderType'] = "STP LMT"
+            order_kwargs['lmtPrice'] = limit_price
+            logging.warning(
+                "sendStopLoss: Extended-hours safety net applied: action=%s stop=%s limit=%s (stop ± 3×stop_size=%s) barType=%s",
+                action, order_kwargs['auxPrice'], limit_price, limit_offset, entryData.get('barType', '')
             )
 
         # Ensure auxPrice is set before placing order (critical for regular hours)

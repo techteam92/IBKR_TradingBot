@@ -698,19 +698,49 @@ def execute_row(row_index):
     logging.debug("Execute row %s detected session: %s, outsideRth: %s", row_index, session, outsideRth)
 
     current_tif = timeInForce[row_index].get()
-    # When in extended hours but user chose Day (or GTC), show warning; trade is still allowed
-    if outsideRth and current_tif != 'OTH':
-        tkinter.messagebox.showwarning(
-            'Session / Time in Force',
-            f"Current session is {session} (extended hours).\n\n"
-            f"You selected Time in Force: {current_tif}.\n\n"
-            f"For extended hours trading, use 'OTH' (Outside Trading Hours).\n"
-            f"Proceeding with current selection. Order will use stop-limit for entry.")
-        logging.warning(
-            f"Row {row_index}: session={session}, Time in Force='{current_tif}' (consider OTH for extended hours); allowing trade.")
+    # Premarket behavior: if user selects DAY, schedule submit for 09:30 ET (market open).
+    # This avoids changing SendTrade logic and avoids warnings for the intended workflow.
+    if outsideRth and current_tif == 'DAY':
+        def _seconds_until_next_rth_open():
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo('US/Eastern')
+            except Exception:
+                tz = None
+            now = datetime.datetime.now(tz) if tz else datetime.datetime.now()
+            today = now.date()
+            rth_open = datetime.datetime.combine(today, datetime.time(9, 30, 0))
+            if tz:
+                rth_open = rth_open.replace(tzinfo=tz)
+            # If it's already past 09:30 ET today, schedule for next day 09:30.
+            if now >= rth_open:
+                rth_open = rth_open + datetime.timedelta(days=1)
+            return max(0, int((rth_open - now).total_seconds()))
 
-    _set_status(row_index, "Sent")
-    _log_snapshot_for_row(row_index)
+        delay_sec = _seconds_until_next_rth_open()
+        _set_status(row_index, "Scheduled 09:30")
+        tkinter.messagebox.showinfo(
+            'Scheduled',
+            f"Current session is {session}.\n\n"
+            f"Time in Force is DAY.\n\n"
+            f"Order will be submitted automatically at 09:30 ET (market open)."
+        )
+        logging.info("Row %s: session=%s, TIF=DAY -> scheduling SendTrade for 09:30 ET in %ss", row_index, session, delay_sec)
+    else:
+        # When in extended hours but user chose Day/GTC, keep existing warning behavior
+        if outsideRth and current_tif != 'OTH':
+            tkinter.messagebox.showwarning(
+                'Session / Time in Force',
+                f"Current session is {session} (extended hours).\n\n"
+                f"You selected Time in Force: {current_tif}.\n\n"
+                f"For extended hours trading, use 'OTH' (Outside Trading Hours).\n"
+                f"Proceeding with current selection. Order will use stop-limit for entry.")
+            logging.warning(
+                f"Row {row_index}: session={session}, Time in Force='{current_tif}' (consider OTH for extended hours); allowing trade.")
+
+    if not (outsideRth and current_tif == 'DAY'):
+        _set_status(row_index, "Sent")
+        _log_snapshot_for_row(row_index)
 
     current_sl_value = "0"
     if len(stopLossValue) > row_index:
@@ -759,8 +789,39 @@ def execute_row(row_index):
     Config.order_replay_pending[trade_key] = is_replay_enabled
     logging.info("Stored replay state for trade: key=%s, replay=%s", trade_key, is_replay_enabled)
 
-    send_future = asyncio.ensure_future(
-        SendTrade(
+    async def _send_now_or_at_rth_open():
+        # If scheduled for 09:30 ET, wait then submit as regular-hours (outsideRth=False) with TIF=DAY.
+        if outsideRth and current_tif == 'DAY':
+            await asyncio.sleep(delay_sec)
+            logging.info("Row %s: submitting scheduled DAY order at/after 09:30 ET", row_index)
+            return await SendTrade(
+                IbConn,
+                symbol[row_index].get(),
+                timeFrame[row_index].get(),
+                takeProfit[row_index].get(),
+                stopLoss[row_index].get(),
+                risk[row_index].get(),
+                'DAY',
+                tradeType[row_index].get(),
+                buySell[row_index].get(),
+                atr[row_index].get(),
+                0,
+                Config.pullBackNo,
+                current_sl_value,
+                breakEven[row_index].get(),
+                False,  # outsideRth=False at RTH open
+                entry_points[row_index].get(),
+                is_option_enabled,
+                option_contract,
+                option_expire,
+                option_entry_order_type,
+                option_sl_order_type,
+                option_tp_order_type,
+                option_risk_amount,
+            )
+
+        # Default: submit immediately with current flags
+        return await SendTrade(
             IbConn,
             symbol[row_index].get(),
             timeFrame[row_index].get(),
@@ -777,15 +838,16 @@ def execute_row(row_index):
             breakEven[row_index].get(),
             outsideRth,
             entry_points[row_index].get(),
-            is_option_enabled,  # New parameter: option enabled
-            option_contract,  # New parameter: option contract (strike)
-            option_expire,  # New parameter: option expiration
-            option_entry_order_type,  # New parameter: entry order type
-            option_sl_order_type,  # New parameter: stop loss order type
-            option_tp_order_type,  # New parameter: profit order type
-            option_risk_amount,  # New parameter: risk amount for options
+            is_option_enabled,
+            option_contract,
+            option_expire,
+            option_entry_order_type,
+            option_sl_order_type,
+            option_tp_order_type,
+            option_risk_amount,
         )
-    )
+
+    send_future = asyncio.ensure_future(_send_now_or_at_rth_open())
 
     row_async_tasks[row_index] = send_future
     disableEntryState(row_index)
@@ -1067,7 +1129,7 @@ def addOldCache():
             if value.get("barType") is not None and value.get("barType") in Config.entryTradeType:
                 tradeType[len(tradeType) - 1].current(Config.entryTradeType.index(value.get("barType")))
                 # If it's a pull back type, disable stop loss
-                pull_back_types = ['PBe1', 'PBe2']
+                pull_back_types = ['PBe1', 'PBe2', 'PBe1 (3)', 'PBe2 (3)']
                 if value.get("barType") in pull_back_types:
                     stopLoss[len(stopLoss) - 1].config(state="disabled")
                     stopLossValue[len(stopLossValue) - 1].config(state="disabled")
@@ -1227,8 +1289,8 @@ def addField(rowYPosition, initial_status_text=""):
         entry_points_entry = entry_pointValueEntry
         current_selection = combo.get()
         
-        # For pull back trade types (PBe1, PBe2, PBe1e2): disable/hide stop loss dropdown
-        pull_back_types = ['PBe1', 'PBe2', 'PBe1e2']
+        # For pull back trade types (PBe1, PBe2, PBe1 (3), PBe2 (3)): disable/hide stop loss dropdown
+        pull_back_types = ['PBe1', 'PBe2', 'PBe1e2', 'PBe1 (3)', 'PBe2 (3)']
         if current_selection in pull_back_types:
             # Disable stop loss dropdown for pull back types
             stpLossEntry.config(state="disabled")
