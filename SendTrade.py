@@ -559,23 +559,37 @@ async def get_first_chart_time(timeFrame ,outsideRth=False):
         return chartTime
 
 
-def atrCheck(histData,ibContract,connection,atrPercentage):
-    mainAmount = ((float(histData['high']) - float(histData['low'])) + Config.add002)
-    logging.info("Candle Data for atr %s for contract %s ",histData,ibContract)
-    candleData = connection.getDailyCandle(ibContract)
-    logging.info("Daily Candle Data for atr %s ", candleData)
-    candleData = util.df(candleData)
-    atr = talib.ATR(candleData['high'], candleData['low'], candleData['close'], 9)
-    logging.info("before calculate atr value is %s",atr[len(atr) - 1])
-    atrAm = (atr[len(atr) - 1] / 100) * float(atrPercentage)
-
-    logging.info("attr value %s and main Amount %s ", atrAm, mainAmount)
-    if (mainAmount > atrAm):
-        logging.info("we cannot place trade attr value is smaller than main value attr value %s and main value %s", atrAm, mainAmount)
-        return True
-        # return False
-    else:
+def atrCheck(histData, ibContract, connection, atrPercentage, stop_size=None):
+    """
+    ATR gate (enabled when atrPercentage > 0):
+    Block trade when stop_size > ATR * (atrPercentage / 100).
+    """
+    try:
+        atr_percent = _to_float(atrPercentage, 0)
+    except Exception:
+        atr_percent = 0
+    if atr_percent <= 0:
         return False
+
+    if stop_size is None:
+        stop_size = ((float(histData['high']) - float(histData['low'])) + Config.add002)
+    stop_size = abs(_to_float(stop_size, 0))
+    if stop_size <= 0:
+        logging.warning("ATR gate: invalid stop_size=%s; skipping ATR gate", stop_size)
+        return False
+
+    atr_value = _get_atr_value(connection, ibContract)
+    if atr_value is None or atr_value <= 0:
+        logging.warning("ATR gate: ATR unavailable for %s; skipping gate", ibContract)
+        return False
+
+    atr_limit = atr_value * (atr_percent / 100.0)
+    block_trade = stop_size > atr_limit
+    logging.info(
+        "ATR gate check: contract=%s stop_size=%s atr=%s atrPercent=%s atrLimit=%s block_trade=%s",
+        ibContract, stop_size, atr_value, atr_percent, atr_limit, block_trade
+    )
+    return block_trade
 
 
 async def first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue,breakEven,outsideRth,entry_points):
@@ -654,6 +668,7 @@ async def first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,bar
         logging.info("Trade action found for market order %s for %s contract ", tradeType, ibContract)
         # connection.cancelTickData(ibContract)
 
+        stop_size = None
         if(quantity == ''):
             quantity = 0
         if int(quantity) == 0:
@@ -677,6 +692,14 @@ async def first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,bar
                            lastPrice, stop_size, risk_amount, quantity)
         else:
             logging.info("user quantity %s",quantity)
+
+        # ATR gate: block trade when stop_size > ATR * (atrPercentage/100)
+        if _to_float(atrPercentage, 0) > 0:
+            if stop_size is None or stop_size <= 0:
+                stop_size = _calculate_stop_size(connection, ibContract, lastPrice, stopLoss, buySellType, histData, timeFrame, chartTime, slValue)
+            if atrCheck(histData, ibContract, connection, atrPercentage, stop_size=stop_size):
+                logging.warning("FB ATR gate blocked trade: stop_size=%s, atrPercentage=%s", stop_size, atrPercentage)
+                return {"status": "ATR_BLOCKED", "strategy": "FB", "stop_size": stop_size, "atr_percentage": atrPercentage}
 
         logging.info("Trade quantity found for market order %s for %s contract ", quantity, ibContract)
         logging.info("everything found we are placing mkt trade")
@@ -875,29 +898,6 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
             await  asyncio.sleep(1)
             continue
 
-        # ATR check functionality removed
-        # During overnight, skip ATR check as it may be too restrictive with limited liquidity
-        # if outsideRth:
-        #     session = _get_current_session()
-        #     if session == 'OVERNIGHT':
-        #         logging.info("OVERNIGHT session: Skipping ATR check to allow trade execution")
-        #     else:
-        #         # Pre-market/After-hours: still check ATR
-        #         logging.info("RB: Checking ATR for pre-market/after-hours (session=%s)", session)
-        #         if (atrCheck(histData, ibContract, connection, atrPercentage)):
-        #             logging.warning("RB: ATR check failed - bar range too large, retrying...")
-        #             await  asyncio.sleep(1)
-        #             continue
-        #         logging.info("RB: ATR check passed for pre-market/after-hours")
-        # else:
-        #     # Regular hours: check ATR
-        #     logging.info("RB RTH: Checking ATR before placing order")
-        #     atr_check_result = atrCheck(histData, ibContract, connection, atrPercentage)
-        #     if atr_check_result:
-        #         logging.warning("RB RTH: ATR check failed - bar range too large, retrying... (histData=%s, atrPercentage=%s)", histData, atrPercentage)
-        #         await  asyncio.sleep(1)
-        #         continue
-        #     logging.info("RB RTH: ATR check passed, proceeding to place order")
         logging.info("RBRR Trade action found for market order %s for %s contract ", tradeType, ibContract)
         # connection.cancelTickData(ibContract)
 
@@ -990,6 +990,14 @@ async def rb_and_rbb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTy
                     quantity = 1
                 logging.info(f"RB quantity calculated: entry=%s, stop_size=%s, risk=%s, quantity=%s", 
                            aux_price, stop_size, risk_amount, quantity)
+
+        # ATR gate: block trade when stop_size > ATR * (atrPercentage/100)
+        if _to_float(atrPercentage, 0) > 0:
+            if stop_size is None or stop_size <= 0:
+                stop_size = _calculate_stop_size(connection, ibContract, aux_price, stopLoss, buySellType, histData, timeFrame, chartTime, slValue)
+            if atrCheck(histData, ibContract, connection, atrPercentage, stop_size=stop_size):
+                logging.warning("RB ATR gate blocked trade: stop_size=%s, atrPercentage=%s", stop_size, atrPercentage)
+                return {"status": "ATR_BLOCKED", "strategy": "RB/RBB", "stop_size": stop_size, "atr_percentage": atrPercentage}
         else:
             logging.info("user quantity")
         
@@ -1479,17 +1487,32 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                         logging.error("Custom stop loss (%s) must be above entry price (%s) for SELL orders", custom_stop, entry_price)
                         return
                 # Calculate stop_size directly (similar to ATR): stop_size = |entry - custom_stop|
-                stop_size = abs(entry_price - custom_stop)
+                # For ASK + 1/2 / BID - 1/2, entry_price passed here is the computed LIMIT price.
+                # But the intended "risk reference" is the ASK/BID used to build that limit:
+                #   limit = reference + (reference - stop) / 2  =>  reference = (2*limit + stop) / 3
+                # Therefore, derive stop_size from reference (so share size uses ASK/BID, not limit).
+                if barType in ('ASK + 1/2', 'BID - 1/2'):
+                    reference_price = (2 * float(entry_price) + float(custom_stop)) / 3.0
+                    stop_size = abs(reference_price - float(custom_stop))
+                    stop_loss_price = round(custom_stop, Config.roundVal)  # keep SL at the user custom stop
+                    logging.info(
+                        "Custom stop (ASK/BID half): derived reference_price=%s from limit=%s and stop=%s; stop_size=%s",
+                        reference_price, entry_price, custom_stop, stop_size
+                    )
+                else:
+                    stop_size = abs(entry_price - custom_stop)
                 if stop_size == 0 or math.isnan(stop_size):
                     logging.error("Stop size invalid (%s) for custom stop loss %s limit order %s", stop_size, custom_stop, symbol)
                     return
                 logging.info("Custom stop loss for %s limit order: entry=%s, custom_stop=%s, stop_size=%s", symbol, entry_price, custom_stop, stop_size)
-                # Calculate stop_loss_price from entry_price (similar to ATR logic)
-                if buySellType == 'BUY':
-                    stop_loss_price = entry_price - stop_size
-                else:
-                    stop_loss_price = entry_price + stop_size
-                stop_loss_price = round(stop_loss_price, Config.roundVal)
+                # Calculate stop_loss_price from entry_price (similar to ATR logic).
+                # For ASK/BID half we already pinned stop_loss_price to custom_stop above.
+                if barType not in ('ASK + 1/2', 'BID - 1/2'):
+                    if buySellType == 'BUY':
+                        stop_loss_price = entry_price - stop_size
+                    else:
+                        stop_loss_price = entry_price + stop_size
+                    stop_loss_price = round(stop_loss_price, Config.roundVal)
             else:
                 # For other stop loss types (EntryBar, HOD, LOD, etc.), use existing logic
                 try:
@@ -3386,12 +3409,17 @@ async def lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
         lastPrice = aux_price
         aux_price = round(aux_price, Config.roundVal)
 
+        # ATR gate: block trade when stop_size > ATR * (atrPercentage/100)
+        if _to_float(atrPercentage, 0) > 0:
+            if stop_size is None or stop_size <= 0:
+                stop_size = _calculate_stop_size(connection, ibContract, aux_price, stopLoss, buySellType, histData, timeFrame, chartTime, slValue)
+            if atrCheck(histData, ibContract, connection, atrPercentage, stop_size=stop_size):
+                logging.warning("LB1 ATR gate blocked trade: stop_size=%s, atrPercentage=%s", stop_size, atrPercentage)
+                return {"status": "ATR_BLOCKED", "strategy": "LB1", "stop_size": stop_size, "atr_percentage": atrPercentage}
+
         lastPrice = round(lastPrice, Config.roundVal)
         logging.info("lb1 Price found for market order %s for %s contract ", lastPrice, ibContract)
-        # ATR check functionality removed
-        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
-        #     await  asyncio.sleep(1)
-        #     continue
+        # ATR gate check is handled above after stop_size calculation.
         logging.info("lb1 Trade action found for market order %s for %s contract ", tradeType, ibContract)
         logging.info(
             "lb1 Trade quantity found for market order %s for %s contract and candle data is %s and last bar data %s",
@@ -3685,10 +3713,13 @@ async def lb2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
         lastPrice = round(lastPrice, Config.roundVal)
         logging.info("lb2 Price found for market order %s for %s contract ", lastPrice, ibContract)
-        # ATR check functionality removed
-        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
-        #     await  asyncio.sleep(1)
-        #     continue
+        # ATR gate: block trade when stop_size > ATR * (atrPercentage/100)
+        if _to_float(atrPercentage, 0) > 0:
+            if stop_size is None or stop_size <= 0:
+                stop_size = _calculate_stop_size(connection, ibContract, aux_price, stopLoss, buySellType, histData, timeFrame, chartTime, slValue)
+            if atrCheck(histData, ibContract, connection, atrPercentage, stop_size=stop_size):
+                logging.warning("LB2 ATR gate blocked trade: stop_size=%s, atrPercentage=%s", stop_size, atrPercentage)
+                return {"status": "ATR_BLOCKED", "strategy": "LB2", "stop_size": stop_size, "atr_percentage": atrPercentage}
         logging.info("lb2 Trade action found for market order %s for %s contract ", tradeType, ibContract)
         logging.info(
             "lb2 Trade quantity found for market order %s for %s contract and candle data is %s and last bar data %s",
@@ -3827,10 +3858,13 @@ async def lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barTyp
 
         lastPrice = round(lastPrice, Config.roundVal)
         logging.info("lb3 Price found for market order %s for %s contract ", lastPrice, ibContract)
-        # ATR check functionality removed
-        # if (atrCheck(histData, ibContract, connection, atrPercentage)):
-        #     await  asyncio.sleep(1)
-        #     continue
+        # ATR gate: block trade when stop_size > ATR * (atrPercentage/100)
+        if _to_float(atrPercentage, 0) > 0:
+            if stop_size is None or stop_size <= 0:
+                stop_size = _calculate_stop_size(connection, ibContract, aux_price, stopLoss, buySellType, histData, timeFrame, chartTime, slValue)
+            if atrCheck(histData, ibContract, connection, atrPercentage, stop_size=stop_size):
+                logging.warning("LB3 ATR gate blocked trade: stop_size=%s, atrPercentage=%s", stop_size, atrPercentage)
+                return {"status": "ATR_BLOCKED", "strategy": "LB3", "stop_size": stop_size, "atr_percentage": atrPercentage}
         logging.info("lb3 Trade action found for market order %s for %s contract ", tradeType, ibContract)
         logging.info(
             "lb3 Trade quantity found for market order %s for %s contract and candle data is %s and last bar data %s",
@@ -5449,13 +5483,17 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
         logging.info("Checking trade type routing: barType='%s'", barType)
         if barType == Config.entryTradeType[Config.FB_INDEX]:  # FB
             logging.debug("Routing to first_bar_fb for barType='%s' (Config.entryTradeType[Config.FB_INDEX]='%s')", barType, Config.entryTradeType[Config.FB_INDEX])
-            await (first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
+            result = await (first_bar_fb(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barType,buySellType,atrPercentage,quantity,pullBackNo,slValue ,breakEven,outsideRth,entry_points))
+            if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
+                return result
         elif barType == Config.entryTradeType[Config.CONDITIONAL_ORDER_INDEX]:  # Conditional Order
             logging.debug("Routing to conditional_order for barType='%s'", barType)
             await (conditional_order(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
         elif barType == Config.entryTradeType[Config.RB_INDEX] or barType == Config.entryTradeType[Config.RBB_INDEX]:  # RB or RBB
             logging.debug("Routing to rb_and_rbb for barType='%s'", barType)
-            await (rb_and_rbb(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
+            result = await (rb_and_rbb(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
+            if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
+                return result
         elif barType in (
             Config.entryTradeType[Config.PBe1_INDEX],
             Config.entryTradeType[Config.PBe1_3_INDEX],
@@ -5519,15 +5557,21 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
             )
         elif barType == Config.entryTradeType[Config.LB_INDEX]:  # LB
             logging.debug("Routing to lb1 for barType='%s' (Config.entryTradeType[Config.LB_INDEX]='%s')", barType, Config.entryTradeType[Config.LB_INDEX])
-            await (lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
+            result = await (lb1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType, atrPercentage,quantity, pullBackNo,slValue ,breakEven,outsideRth,entry_points))
+            if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
+                return result
         elif barType == Config.entryTradeType[Config.LB2_INDEX]:  # LB2
             logging.debug("Routing to lb2 for barType='%s' (Config.entryTradeType[Config.LB2_INDEX]='%s')", barType, Config.entryTradeType[Config.LB2_INDEX])
-            await (lb2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+            result = await (lb2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
+            if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
+                return result
         elif barType == Config.entryTradeType[Config.LB3_INDEX]:  # LB3
             logging.debug("Routing to lb3 for barType='%s' (Config.entryTradeType[Config.LB3_INDEX]='%s')", barType, Config.entryTradeType[Config.LB3_INDEX])
-            await (lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
+            result = await (lb3(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType, buySellType,
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
+            if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
+                return result
 
         logging.debug("task done for %s symbol",symbol)
 

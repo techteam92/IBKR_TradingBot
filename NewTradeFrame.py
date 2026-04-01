@@ -17,6 +17,8 @@ tradeType = []
 buySell = []
 entry_points = []
 atr=[]
+atrEnabled = []  # Track ATR guard state for each row
+atrButtonList = []  # Store ATR button reference for each row
 quantity=[]
 cancelButton = []
 row_async_tasks = []
@@ -445,7 +447,7 @@ def _setup_hotkeys(root):
     Bind hotkeys to the root window. Settings apply to the active row (last row).
     HOT KEYS:
       SHIFT+ENTER = Execute
-      Stop Loss: SHIFT+C=Custom, SHIFT+L=LOD, SHIFT+H=HOD, SHIFT+1/2/3/4 = 15/20/25/33% ATR
+      Stop Loss: SHIFT+C=Custom, SHIFT+L=LOD, SHIFT+H=HOD, SHIFT+0/1/2/3/4 = 10/15/20/25/33% ATR
       Trade Type: ALT+C=Custom entry, ALT+A=ASK+1/2, ALT+B=BID-1/2, ALT+F=FB, ALT+L=Last Bar (LB),
                   ALT+R=RBB, ALT+P=PBe1, CTRL+P=PBe2, CTRL+L=Limit Order, CTRL+C=Conditional
       Buy/Sell: CTRL+B=BUY, CTRL+S=SELL
@@ -514,14 +516,16 @@ def _setup_hotkeys(root):
     # Execute: SHIFT+ENTER
     root.bind("<Shift-Return>", execute_active)
 
-    # Stop Loss: SHIFT+C=Custom(1), SHIFT+L=LOD(4), SHIFT+H=HOD(3), SHIFT+1/2/3/4 = 15/20/25/33% ATR (5,6,7,8)
+    # Stop Loss: SHIFT+C=Custom(1), SHIFT+L=LOD(4), SHIFT+H=HOD(3), SHIFT+0/1/2/3/4 = 10/15/20/25/33% ATR
     root.bind("<Shift-c>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
     root.bind("<Shift-C>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("Custom"))))
     root.bind("<Shift-l>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("LOD"))))
     root.bind("<Shift-L>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("LOD"))))
     root.bind("<Shift-h>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("HOD"))))
     root.bind("<Shift-H>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("HOD"))))
-    # Shift+number: on Windows Tk sends the shifted character keysym (! @ # $), not "1" "2" "3" "4"
+    # Shift+number: on Windows Tk sends shifted character keysyms (! @ # $ )), not numeric keys.
+    root.bind("<Shift-parenright>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("10% ATR"))))  # Shift+0
+    root.bind("<Shift-0>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("10% ATR"))))  # Fallback for platforms that report Shift+0
     root.bind("<Shift-exclam>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("15% ATR"))))   # Shift+1
     root.bind("<Shift-at>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("20% ATR"))))     # Shift+2
     root.bind("<Shift-numbersign>", on_key(lambda i: apply_stop_loss(i, Config.stopLoss.index("25% ATR"))))  # Shift+3
@@ -574,7 +578,7 @@ def _setup_hotkeys(root):
     root.bind("<Shift-d>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("DAY"))))
     root.bind("<Shift-D>", on_key(lambda i: apply_tif(i, Config.timeInForce.index("DAY"))))
 
-    logging.info("Hotkeys bound: Shift+Enter=Execute, Shift+C=Custom stop, Shift+L/H/1-4=Stop Loss, Alt+C=Custom entry, Alt+A/B/F/L/R/P=Trade Type, Ctrl+P/L/C=Trade Type, Ctrl+B=BUY, Ctrl+S=SELL, Ctrl+1-7=Time Frame, Alt+1-3=Profit, Shift+O/D=Time")
+    logging.info("Hotkeys bound: Shift+Enter=Execute, Shift+C=Custom stop, Shift+L/H/0-4=Stop Loss, Alt+C=Custom entry, Alt+A/B/F/L/R/P=Trade Type, Ctrl+P/L/C=Trade Type, Ctrl+B=BUY, Ctrl+S=SELL, Ctrl+1-7=Time Frame, Alt+1-3=Profit, Shift+O/D=Time")
 
 
 def NewTradeFrame(frame,connection):
@@ -609,7 +613,7 @@ def _log_ui_elements_displayed():
     """Log that all trading row UI elements are present (Symbol through Option, Status)."""
     elements = [
         "Symbol", "Stop Loss", "Trade Type", "Buy/Sell", "Execute", "Risk", "Profit",
-        "Time Frame", "Time In Force", "Replay", "Break Even", "Option", "Status"
+        "Time Frame", "Time In Force", "Replay", "ATR", "Break Even", "Option", "Status"
     ]
     logging.debug("UI: All elements displayed: %s", ", ".join(elements))
 
@@ -654,6 +658,16 @@ def checkLastTradingTime():
 def add():
     """Add a new trade row when user clicks ADD button."""
     addField(0, "")
+    _scroll_to_bottom()
+
+
+def _scroll_to_bottom():
+    """Scroll trade list to the most recently added row."""
+    global scroll_canvas
+    if scroll_canvas is not None:
+        scroll_canvas.update_idletasks()
+        scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+        scroll_canvas.yview_moveto(1.0)
 
 
 def _log_snapshot_for_row(row_index):
@@ -789,6 +803,10 @@ def execute_row(row_index):
     Config.order_replay_pending[trade_key] = is_replay_enabled
     logging.info("Stored replay state for trade: key=%s, replay=%s", trade_key, is_replay_enabled)
 
+    atr_value_for_send = ""
+    if row_index < len(atr) and row_index < len(atrEnabled) and atrEnabled[row_index]:
+        atr_value_for_send = atr[row_index].get().strip()
+
     async def _send_now_or_at_rth_open():
         # If scheduled for 09:30 ET, wait then submit as regular-hours (outsideRth=False) with TIF=DAY.
         if outsideRth and current_tif == 'DAY':
@@ -804,7 +822,7 @@ def execute_row(row_index):
                 'DAY',
                 tradeType[row_index].get(),
                 buySell[row_index].get(),
-                atr[row_index].get(),
+                atr_value_for_send,
                 0,
                 Config.pullBackNo,
                 current_sl_value,
@@ -831,7 +849,7 @@ def execute_row(row_index):
             timeInForce[row_index].get(),
             tradeType[row_index].get(),
             buySell[row_index].get(),
-            atr[row_index].get(),
+            atr_value_for_send,
             0,
             Config.pullBackNo,
             current_sl_value,
@@ -849,6 +867,27 @@ def execute_row(row_index):
 
     send_future = asyncio.ensure_future(_send_now_or_at_rth_open())
 
+    def _handle_send_done(fut):
+        try:
+            result = fut.result()
+            if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
+                _set_status(row_index, "ATR Blocked")
+                enableEntryState(row_index)
+                row_async_tasks[row_index] = None
+                btn = cancelButton[row_index]
+                btn.config(text="Execute")
+                btn['command'] = lambda idx=row_index: execute_row(idx)
+                logging.info(
+                    "Row %s blocked by ATR gate: strategy=%s stop_size=%s atr_percentage=%s",
+                    row_index, result.get("strategy"), result.get("stop_size"), result.get("atr_percentage")
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception as done_err:
+            logging.error("Error handling SendTrade completion for row %s: %s", row_index, done_err)
+
+    send_future.add_done_callback(_handle_send_done)
+
     row_async_tasks[row_index] = send_future
     disableEntryState(row_index)
 
@@ -861,12 +900,6 @@ def execute_row(row_index):
     addField(0, "")
 
     # Scroll to bottom so the new row and status are visible
-    def _scroll_to_bottom():
-        global scroll_canvas
-        if scroll_canvas is not None:
-            scroll_canvas.update_idletasks()
-            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
-            scroll_canvas.yview_moveto(1.0)
     _scroll_to_bottom()
 
 
@@ -883,6 +916,96 @@ def toggle_replay(row_index):
             else:
                 replayButton.config(bg='#D3D3D3')  # Light gray when disabled
                 logging.info("Replay disabled for row %s", row_index)
+
+
+def _toggle_atr_fields(row_index):
+    """Toggle ATR guard for a row and show modal to configure ATR% when enabled."""
+    if row_index < len(atrEnabled):
+        atrEnabled[row_index] = not atrEnabled[row_index]
+        if atrEnabled[row_index]:
+            _show_atr_config_modal(row_index)
+            if row_index < len(atrButtonList) and atrButtonList[row_index] is not None:
+                atrButtonList[row_index].config(bg='#90EE90' if atrEnabled[row_index] else '#D3D3D3')
+        else:
+            # Disable ATR guard and clear stored ATR value
+            if row_index < len(atr):
+                atr[row_index].config(state="normal")
+                atr[row_index].delete(0, END)
+                atr[row_index].insert(0, "")
+                atr[row_index].config(state="disabled")
+            if row_index < len(atrButtonList) and atrButtonList[row_index] is not None:
+                atrButtonList[row_index].config(bg='#D3D3D3')
+
+
+def _show_atr_config_modal(row_index):
+    """Show modal dialog to configure ATR percentage threshold for guard logic."""
+    parent = scrollable_frame.winfo_toplevel()
+
+    modal = tkinter.Toplevel(parent)
+    modal.title("ATR Guard Configuration")
+    modal.geometry("320x170")
+    modal.resizable(False, False)
+    modal.transient(parent)
+    modal.grab_set()
+
+    modal.update_idletasks()
+    x = (modal.winfo_screenwidth() // 2) - (320 // 2)
+    y = (modal.winfo_screenheight() // 2) - (170 // 2)
+    modal.geometry(f"320x170+{x}+{y}")
+
+    current_value = ""
+    if row_index < len(atr):
+        current_value = atr[row_index].get() if atr[row_index].get() else str(Config.defaultValue.get("atr", ""))
+
+    Label(modal, text="Input ATR % threshold:", font=(Config.fontName2, Config.fontSize2)).pack(pady=(16, 8))
+    atr_var = StringVar(modal, value=current_value)
+    atr_entry = Entry(modal, textvariable=atr_var, width=16, font=(Config.fontName2, Config.fontSize2))
+    atr_entry.pack(pady=4)
+    atr_entry.select_range(0, END)
+    atr_entry.focus()
+
+    button_frame = Frame(modal)
+    button_frame.pack(pady=12)
+
+    def save_atr_config():
+        val = atr_var.get().strip()
+        if val == "":
+            tkinter.messagebox.showerror("Invalid Input", "Please enter ATR % value (example: 20)")
+            atr_entry.focus()
+            return
+        try:
+            val_num = float(val)
+            if val_num <= 0:
+                raise ValueError()
+            val_clean = str(int(val_num)) if val_num.is_integer() else str(val_num)
+            if row_index < len(atr):
+                atr[row_index].config(state="normal")
+                atr[row_index].delete(0, END)
+                atr[row_index].insert(0, val_clean)
+                atr[row_index].config(state="disabled")
+            modal.destroy()
+        except ValueError:
+            tkinter.messagebox.showerror("Invalid Input", "Please enter a valid positive number (example: 20)")
+            atr_entry.focus()
+
+    def cancel_atr_config():
+        # If user cancels while enabling, revert to disabled state
+        if row_index < len(atrEnabled):
+            atrEnabled[row_index] = False
+        if row_index < len(atr):
+            atr[row_index].config(state="normal")
+            atr[row_index].delete(0, END)
+            atr[row_index].insert(0, "")
+            atr[row_index].config(state="disabled")
+        if row_index < len(atrButtonList) and atrButtonList[row_index] is not None:
+            atrButtonList[row_index].config(bg='#D3D3D3')
+        modal.destroy()
+
+    Button(button_frame, text="OK", width=8, command=save_atr_config).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Cancel", width=8, command=cancel_atr_config).pack(side=LEFT, padx=5)
+
+    atr_entry.bind("<Return>", lambda e: save_atr_config())
+    atr_entry.bind("<Escape>", lambda e: cancel_atr_config())
 
 
 def _toggle_option_fields(row_index):
@@ -1095,6 +1218,10 @@ def cancel_row(row_index):
         replayEnabled[row_index] = False
         if row_index < len(replayButtonList):
             replayButtonList[row_index].config(bg='#D3D3D3')
+    if row_index < len(atrEnabled):
+        atrEnabled[row_index] = False
+        if row_index < len(atrButtonList):
+            atrButtonList[row_index].config(bg='#D3D3D3')
 
 
 def addOldCache():
@@ -1155,6 +1282,17 @@ def addOldCache():
                 if row_idx < len(replayButtonList) and replayButtonList[row_idx] is not None:
                     replayButtonList[row_idx].config(bg='#90EE90' if replayEnabled[row_idx] else '#D3D3D3')
 
+            # ATR state/value: if cached entry has userAtr value, restore and enable ATR button
+            if row_idx < len(atr) and value.get("userAtr") is not None and str(value.get("userAtr")).strip() != "":
+                atr[row_idx].config(state="normal")
+                atr[row_idx].delete(0, END)
+                atr[row_idx].insert(0, str(value.get("userAtr")).strip())
+                atr[row_idx].config(state="disabled")
+                if row_idx < len(atrEnabled):
+                    atrEnabled[row_idx] = True
+                if row_idx < len(atrButtonList) and atrButtonList[row_idx] is not None:
+                    atrButtonList[row_idx].config(bg='#90EE90')
+
 
 
 
@@ -1162,9 +1300,26 @@ def addField(rowYPosition, initial_status_text=""):
     logging.debug("New Row Adding..")
     field = Frame(scrollable_frame)
     field.config(bg='#DCDCDC')
-    # Configure 13 columns for the new order (added Option column) and 2 rows (labels + fields)
-    for col in range(13):
-        field.columnconfigure(col, weight=1, uniform="row")
+    # 14 columns (0–13): Symbol … Status. Do not configure a 15th column or empty space appears at the right edge.
+    # Weighted columns so wide combos (Stop Loss, Trade Type, TIF) get more space; buttons stay narrower.
+    _col_weights = {
+        0: 1,   # Symbol
+        1: 2,   # Stop Loss
+        2: 3,   # Trade Type
+        3: 1,   # Buy/Sell
+        4: 1,   # Execute
+        5: 1,   # Risk
+        6: 1,   # Profit
+        7: 2,   # Time Frame (e.g. "15 mins")
+        8: 2,   # Time In Force (was clipped with equal tiny columns)
+        9: 1,   # Replay
+        10: 1,  # ATR
+        11: 1,  # Break Even
+        12: 1,  # Option
+        13: 2,  # Status
+    }
+    for col in range(14):
+        field.columnconfigure(col, weight=_col_weights.get(col, 1), minsize=36)
     for row in range(2):
         field.rowconfigure(row, weight=1)
     
@@ -1209,17 +1364,21 @@ def addField(rowYPosition, initial_status_text=""):
     replayLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Replay", justify=LEFT)
     replayLbl.grid(row=0, column=9, sticky="ew", padx=5, pady=3)
     
-    # 11) BREAK EVEN label
+    # 11) ATR label (toggle button + modal, no inline input)
+    atrLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="ATR", justify=LEFT)
+    atrLbl.grid(row=0, column=10, sticky="ew", padx=5, pady=3)
+    
+    # 12) BREAK EVEN label
     breakEvenLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Break Even", justify=LEFT)
-    breakEvenLbl.grid(row=0, column=10, sticky="ew", padx=5, pady=3)
+    breakEvenLbl.grid(row=0, column=11, sticky="ew", padx=5, pady=3)
     
-    # 12) OPTION label
+    # 13) OPTION label
     optionLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Option", justify=LEFT)
-    optionLbl.grid(row=0, column=11, sticky="ew", padx=5, pady=3)
+    optionLbl.grid(row=0, column=12, sticky="ew", padx=5, pady=3)
     
-    # 13) STATUS label
+    # 14) STATUS label
     statusLbl = Label(field, font=(Config.fontName2, Config.fontSize2), text="Status", justify=LEFT)
-    statusLbl.grid(row=0, column=12, sticky="ew", padx=5, pady=3)
+    statusLbl.grid(row=0, column=13, sticky="ew", padx=5, pady=3)
     
     # Fields row (row 1)
     # 1) SYMBOL (column 0)
@@ -1354,16 +1513,16 @@ def addField(rowYPosition, initial_status_text=""):
     takeProfit.append(profitEntry)
 
     # 8) TIME FRAME (column 7)
-    secEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeFrame)
-    secEntry.config(width=10)
+    secEntry = ttk.Combobox(field, state="readonly", width=11, value=Config.timeFrame)
+    secEntry.config(width=11)
     secEntry.grid(row=1, column=7, sticky="ew", padx=5, pady=3)
     secEntry.current(0)
     setDefaultTimeFrame(secEntry)
     timeFrame.append(secEntry)
 
-    # 9) TIME IN FORCE (column 8)
-    timeForceEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.timeInForce)
-    timeForceEntry.config(width=10)
+    # 9) TIME IN FORCE (column 8) — wider so "DAY" / "OTH" / "GTC" are not clipped
+    timeForceEntry = ttk.Combobox(field, state="readonly", width=12, value=Config.timeInForce)
+    timeForceEntry.config(width=12)
     timeForceEntry.grid(row=1, column=8, sticky="ew", padx=5, pady=3)
     timeForceEntry.current(0)
     setDefaultTif(timeForceEntry)
@@ -1383,18 +1542,36 @@ def addField(rowYPosition, initial_status_text=""):
         replayButton.config(bg='#90EE90')  # Light green when enabled
     replayButton['command'] = lambda idx=row_index_for_replay: toggle_replay(idx)
 
-    # 11) BREAK EVEN (column 10)
+    # 11) ATR (column 10) - toggle + modal (no inline input box)
+    row_index_for_atr = len(symbol) - 1
+    atrButton = Button(field, width="10", height="1", text="ATR", bg='#D3D3D3')
+    atrButton.grid(row=1, column=10, sticky="ew", padx=5, pady=3)
+    atrEnabled.append(False)
+    atrButtonList.append(atrButton)
+    atrButton['command'] = lambda idx=row_index_for_atr: _toggle_atr_fields(idx)
+
+    # Hidden entry field to store ATR % value (shown only in ATR modal)
+    atrEntry = Entry(field, width="0", textvariable=StringVar(field))
+    atrEntry.config(width=0)
+    atrEntry.grid(row=1, column=10, padx=0, pady=0)
+    atrEntry.grid_remove()
+    setDefaultAtr(atrEntry)
+    # Keep ATR disabled by default; user must toggle ATR button on.
+    atrEntry.config(state="disabled")
+    atr.append(atrEntry)
+
+    # 12) BREAK EVEN (column 11)
     breakEvenEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.breakEven)
     breakEvenEntry.config(width=10)
-    breakEvenEntry.grid(row=1, column=10, sticky="ew", padx=5, pady=3)
+    breakEvenEntry.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
     breakEvenEntry.current(0)
     setDefaultbreakEvenEntryType(breakEvenEntry)
     breakEven.append(breakEvenEntry)
 
-    # 12) OPTION (column 11) - use Button (like Replay) so it is always visible in frozen exe
+    # 13) OPTION (column 12) - use Button (like Replay) so it is always visible in frozen exe
     row_index_for_option = len(symbol) - 1
     optionButton = Button(field, width="10", height="1", text="Option", bg='#D3D3D3')
-    optionButton.grid(row=1, column=11, sticky="ew", padx=5, pady=3)
+    optionButton.grid(row=1, column=12, sticky="ew", padx=5, pady=3)
     optionEnabled.append(False)  # Initialize option as disabled
     optionButtonList.append(optionButton)
     optionButton['command'] = lambda idx=row_index_for_option: _toggle_option_fields(idx)
@@ -1405,22 +1582,19 @@ def addField(rowYPosition, initial_status_text=""):
     optionProfitOrderType.append(StringVar(field, "Market"))  # Default profit order type
     optionRiskAmount.append(StringVar(field, ""))  # Default risk amount (blank = use share quantity)
     
-    # 13) STATUS (column 12)
+    # 14) STATUS (column 13)
     statusVar = StringVar(field)
     statusEntry = Entry(field, width="9", textvariable=statusVar)
     statusEntry.config(width=9)
-    statusEntry.grid(row=1, column=12, sticky="ew", padx=5, pady=3)
+    statusEntry.grid(row=1, column=13, sticky="ew", padx=5, pady=3)
     status.append(statusEntry)
     _set_status(len(status) - 1, initial_status_text)
 
-    # ATR % field removed - functionality removed
-    # Create a hidden entry with default value to maintain compatibility
-    atrVar = StringVar(field, "0")
-    atrEntry = Entry(field, width="0")  # Hidden entry
-    atr.append(atrEntry)
+    # ATR is configured via ATR button modal; value is stored in hidden atr entry
 
 
-    field.pack(side=TOP, pady=8, fill=X, expand=True)
+    # Fill full canvas width so the row stretches to the right edge (no dead gap after Status)
+    field.pack(side=TOP, pady=8, fill=BOTH, expand=True)
 
 
 
@@ -1444,8 +1618,7 @@ def disableEntryState(row_index=None):
     symbol[row_index].config(state="disabled")
     risk[row_index].config(state="disabled")
     status[row_index].config(state="disabled")
-    # ATR field disabled - functionality removed
-    # atr[row_index].config(state="disabled")
+    atr[row_index].config(state="disabled")
     stopLossValue[row_index].config(state="disabled")
     entry_points[row_index].config(state="disabled")
     
@@ -1473,8 +1646,7 @@ def enableEntryState(row_index):
     risk[row_index].config(state="normal")
     status[row_index].config(state="normal")
     buySell[row_index].config(state="readonly")
-    # ATR field disabled - functionality removed
-    # atr[row_index].config(state="normal")
+    atr[row_index].config(state="normal")
 
 
 
