@@ -40,6 +40,65 @@ IbConn = None
 scrollable_frame = None
 scroll_canvas = None  # Canvas that contains scrollable_frame; used to scroll to bottom after Execute
 
+
+def _canonical_stop_loss_type(display_text):
+    """Map stop-loss combobox display to a Config.stopLoss value for SendTrade."""
+    if not display_text:
+        return Config.stopLoss[0]
+    s = display_text.strip()
+    if s.startswith("Custom"):
+        return "Custom"
+    if s in Config.stopLoss:
+        return s
+    return s
+
+
+def _canonical_trade_type(display_text):
+    """Map trade-type combobox display to a Config.entryTradeType value for SendTrade."""
+    if not display_text:
+        return Config.entryTradeType[0]
+    s = display_text.strip()
+    if s.startswith("Custom ("):
+        return "Custom"
+    if s == "Custom" or (s.startswith("Custom") and "(" not in s):
+        return "Custom"
+    if s.startswith("Limit Order ("):
+        return "Limit Order"
+    if s == "Limit Order":
+        return "Limit Order"
+    if s.startswith("Conditional Order"):
+        return "Conditional Order"
+    if s in Config.entryTradeType:
+        return s
+    return s
+
+
+def _set_stop_loss_combo_display(stop_loss_combo, numeric_value):
+    """Show Custom (price) in the stop-loss combobox; numeric value stays in hidden entry."""
+    val = (numeric_value or "").strip()
+    stop_loss_combo.config(state="normal")
+    if not val or val == "0":
+        stop_loss_combo.set("Custom")
+    else:
+        stop_loss_combo.set("Custom ({})".format(val))
+    stop_loss_combo.config(state="readonly")
+
+
+def _set_trade_type_combo_display(trade_type_combo, base_type, price_str):
+    """Show Custom/Limit (price) in the trade-type combobox; base_type is canonical."""
+    ps = (price_str or "").strip()
+    trade_type_combo.config(state="normal")
+    if base_type in ("Custom", "Limit Order") and ps and ps != "0":
+        trade_type_combo.set("{} ({})".format(base_type, ps))
+    elif base_type == "Conditional Order":
+        trade_type_combo.set("Conditional Order")
+    elif base_type in Config.entryTradeType:
+        trade_type_combo.current(Config.entryTradeType.index(base_type))
+    else:
+        trade_type_combo.set(base_type)
+    trade_type_combo.config(state="readonly")
+
+
 def _show_entry_price_modal(trade_type_combo, entry_points_entry, order_type_name):
     """
     Show a modal dialog to enter entry price for Limit Order or Stop Order.
@@ -93,6 +152,7 @@ def _show_entry_price_modal(trade_type_combo, entry_points_entry, order_type_nam
             else:
                 entry_points_entry.delete(0, END)
                 entry_points_entry.insert(0, "0")
+            _set_trade_type_combo_display(trade_type_combo, order_type_name, entry_points_entry.get())
             modal.destroy()
         except ValueError:
             tkinter.messagebox.showerror("Invalid Input", "Please enter a valid number")
@@ -298,6 +358,9 @@ def _show_conditional_order_modal(trade_type_combo, entry_points_entry, order_ty
             ]
             entry_points_entry.delete(0, END)
             entry_points_entry.insert(0, ",".join(values))
+            trade_type_combo.config(state="normal")
+            trade_type_combo.set("Conditional Order")
+            trade_type_combo.config(state="readonly")
             modal.destroy()
         except ValueError:
             tkinter.messagebox.showerror("Invalid Input", "Please enter valid numbers for all price fields")
@@ -373,6 +436,7 @@ def _show_custom_stop_loss_modal(stop_loss_combo, value_entry):
             else:
                 value_entry.delete(0, END)
                 value_entry.insert(0, "0")
+            _set_stop_loss_combo_display(stop_loss_combo, value_entry.get())
             modal.destroy()
         except ValueError:
             tkinter.messagebox.showerror("Invalid Input", "Please enter a valid number")
@@ -393,19 +457,24 @@ def _show_custom_stop_loss_modal(stop_loss_combo, value_entry):
     # Wait for modal to close
     modal.wait_window()
 
-def _update_stop_loss_value_field(stop_loss_combo, value_entry, reset_value=False):
+def _update_stop_loss_value_field(stop_loss_combo, value_entry, reset_value=False, open_modal_if_custom=True):
     """
-    Handle stop loss selection change. Shows modal for Custom option.
+    Handle stop loss selection change. Optionally shows modal for Custom option.
     """
-    selection = stop_loss_combo.get()
-    if selection == "Custom":  # "Custom"
-        # Store the current index before showing modal (which is already "Custom")
-        # We'll track the previous index inside the modal function
-        _show_custom_stop_loss_modal(stop_loss_combo, value_entry)
+    canon = _canonical_stop_loss_type(stop_loss_combo.get())
+    if canon == "Custom":
+        if open_modal_if_custom:
+            _show_custom_stop_loss_modal(stop_loss_combo, value_entry)
+        else:
+            _set_stop_loss_combo_display(stop_loss_combo, value_entry.get())
     else:
         if reset_value:
             value_entry.delete(0, END)
             value_entry.insert(0, "0")
+        if stop_loss_combo.get() != canon:
+            stop_loss_combo.config(state="normal")
+            stop_loss_combo.set(canon)
+            stop_loss_combo.config(state="readonly")
 
 def getScrollableframe(frame):
     container = Frame(frame)
@@ -597,8 +666,11 @@ def NewTradeFrame(frame,connection):
     # defaultSetting.place(relx=0.28, rely=0.3, anchor=CENTER)
     global addButton
     addButton = Frame(scrollable_frame)
-    Button(addButton, width="15", height="1", text="ADD", command=add).pack( side = BOTTOM)
-    addButton.pack( side = BOTTOM)
+    _add_btn_row = Frame(addButton)
+    _add_btn_row.pack(side=BOTTOM)
+    Button(_add_btn_row, width="14", height="1", text="ADD", command=add).pack(side=LEFT, padx=(0, 6))
+    Button(_add_btn_row, width="14", height="1", text="Duplicate", command=duplicate_last).pack(side=LEFT)
+    addButton.pack(side=BOTTOM)
     # Log that all trading row elements are displayed (for debugging visibility, e.g. Option button)
     _log_ui_elements_displayed()
     # Hotkeys: apply to active (last) row
@@ -658,6 +730,99 @@ def checkLastTradingTime():
 def add():
     """Add a new trade row when user clicks ADD button."""
     addField(0, "")
+    _scroll_to_bottom()
+
+
+def duplicate_last():
+    """
+    Copy the template row onto another row.
+
+    If the bottom row is blank (e.g. auto-added after Execute), fill that row instead of
+    appending — avoids an empty row stuck between the template and the duplicate.
+    If the bottom row already has a symbol, append a new row and copy the bottom row there.
+    """
+    n = len(symbol)
+    if n < 1:
+        return
+
+    tail_blank = n >= 2 and not (symbol[n - 1].get() or "").strip()
+    if tail_blank:
+        src = n - 2
+        dst = n - 1
+    else:
+        if n == 1 and not (symbol[0].get() or "").strip():
+            return
+        src = n - 1
+        addField(0, "")
+        dst = len(symbol) - 1
+
+    pull_back_trade_types = ['PBe1', 'PBe2', 'PBe1e2', 'PBe1 (3)', 'PBe2 (3)']
+
+    symbol[dst].delete(0, END)
+    symbol[dst].insert(0, symbol[src].get())
+
+    timeFrame[dst].current(timeFrame[src].current())
+    takeProfit[dst].current(takeProfit[src].current())
+    buySell[dst].current(buySell[src].current())
+    timeInForce[dst].current(timeInForce[src].current())
+    breakEven[dst].current(breakEven[src].current())
+
+    risk[dst].delete(0, END)
+    risk[dst].insert(0, risk[src].get())
+
+    stopLossValue[dst].config(state="normal")
+    stopLossValue[dst].delete(0, END)
+    stopLossValue[dst].insert(0, stopLossValue[src].get())
+
+    sl_canon = _canonical_stop_loss_type(stopLoss[src].get())
+    if sl_canon == "Custom":
+        _set_stop_loss_combo_display(stopLoss[dst], stopLossValue[dst].get())
+    else:
+        stopLoss[dst].current(Config.stopLoss.index(sl_canon))
+
+    tt_canon = _canonical_trade_type(tradeType[src].get())
+    entry_points[dst].delete(0, END)
+    entry_points[dst].insert(0, entry_points[src].get())
+    if tt_canon in ("Custom", "Limit Order"):
+        _set_trade_type_combo_display(tradeType[dst], tt_canon, entry_points[dst].get())
+    elif tt_canon == "Conditional Order":
+        tradeType[dst].config(state="normal")
+        tradeType[dst].set("Conditional Order")
+        tradeType[dst].config(state="readonly")
+    else:
+        tradeType[dst].current(Config.entryTradeType.index(tt_canon))
+
+    if tt_canon in pull_back_trade_types:
+        stopLoss[dst].config(state="disabled")
+        stopLossValue[dst].config(state="disabled")
+    else:
+        stopLoss[dst].config(state="readonly")
+        stopLossValue[dst].config(state="normal")
+
+    replayEnabled[dst] = replayEnabled[src]
+    if dst < len(replayButtonList) and replayButtonList[dst] is not None:
+        replayButtonList[dst].config(bg='#90EE90' if replayEnabled[dst] else '#D3D3D3')
+
+    atrEnabled[dst] = atrEnabled[src]
+    if dst < len(atr) and src < len(atr):
+        atr[dst].config(state="normal")
+        atr[dst].delete(0, END)
+        atr[dst].insert(0, atr[src].get())
+        atr[dst].config(state="disabled")
+    if dst < len(atrButtonList) and atrButtonList[dst] is not None:
+        atrButtonList[dst].config(bg='#90EE90' if atrEnabled[dst] else '#D3D3D3')
+
+    optionEnabled[dst] = optionEnabled[src]
+    if dst < len(optionContract) and src < len(optionContract):
+        optionContract[dst].set(optionContract[src].get())
+        optionExpire[dst].set(optionExpire[src].get())
+        optionEntryOrderType[dst].set(optionEntryOrderType[src].get())
+        optionStopLossOrderType[dst].set(optionStopLossOrderType[src].get())
+        optionProfitOrderType[dst].set(optionProfitOrderType[src].get())
+        optionRiskAmount[dst].set(optionRiskAmount[src].get())
+    if dst < len(optionButtonList) and optionButtonList[dst] is not None:
+        optionButtonList[dst].config(bg='#90EE90' if optionEnabled[dst] else '#D3D3D3')
+
     _scroll_to_bottom()
 
 
@@ -797,8 +962,11 @@ def execute_row(row_index):
                 tkinter.messagebox.showerror('Error', "Option trading requires Strike and Expiration settings")
                 return
 
+    stop_loss_canon = _canonical_stop_loss_type(stopLoss[row_index].get())
+    trade_type_canon = _canonical_trade_type(tradeType[row_index].get())
+
     # Store replay state for this trade (will be retrieved in StatusUpdate)
-    trade_key = (symbol[row_index].get(), timeFrame[row_index].get(), tradeType[row_index].get(), 
+    trade_key = (symbol[row_index].get(), timeFrame[row_index].get(), trade_type_canon,
                  buySell[row_index].get(), datetime.datetime.now().timestamp())
     Config.order_replay_pending[trade_key] = is_replay_enabled
     logging.info("Stored replay state for trade: key=%s, replay=%s", trade_key, is_replay_enabled)
@@ -817,10 +985,10 @@ def execute_row(row_index):
                 symbol[row_index].get(),
                 timeFrame[row_index].get(),
                 takeProfit[row_index].get(),
-                stopLoss[row_index].get(),
+                stop_loss_canon,
                 risk[row_index].get(),
                 'DAY',
-                tradeType[row_index].get(),
+                trade_type_canon,
                 buySell[row_index].get(),
                 atr_value_for_send,
                 0,
@@ -844,10 +1012,10 @@ def execute_row(row_index):
             symbol[row_index].get(),
             timeFrame[row_index].get(),
             takeProfit[row_index].get(),
-            stopLoss[row_index].get(),
+            stop_loss_canon,
             risk[row_index].get(),
             timeInForce[row_index].get(),
-            tradeType[row_index].get(),
+            trade_type_canon,
             buySell[row_index].get(),
             atr_value_for_send,
             0,
@@ -1243,7 +1411,7 @@ def addOldCache():
                     stopLossValue[len(stopLossValue) - 1].insert(0,"0")
                 else:
                     stopLossValue[len(stopLossValue) - 1].insert(0, value.get("slValue"))
-                _update_stop_loss_value_field(stopLoss[len(stopLoss) - 1], stopLossValue[len(stopLossValue) - 1], reset_value=False)
+                _update_stop_loss_value_field(stopLoss[len(stopLoss) - 1], stopLossValue[len(stopLossValue) - 1], reset_value=False, open_modal_if_custom=False)
             if value.get("entry_points")==None:
                 entry_points[len(entry_points) - 1].insert(0,"0")
             else:
@@ -1254,10 +1422,18 @@ def addOldCache():
 
             # Set trade type if available
             if value.get("barType") is not None and value.get("barType") in Config.entryTradeType:
-                tradeType[len(tradeType) - 1].current(Config.entryTradeType.index(value.get("barType")))
+                bt = value.get("barType")
+                tradeType[len(tradeType) - 1].current(Config.entryTradeType.index(bt))
+                if bt in ("Custom", "Limit Order"):
+                    _set_trade_type_combo_display(tradeType[len(tradeType) - 1], bt, entry_points[len(entry_points) - 1].get())
+                elif bt == "Conditional Order":
+                    _co = tradeType[len(tradeType) - 1]
+                    _co.config(state="normal")
+                    _co.set("Conditional Order")
+                    _co.config(state="readonly")
                 # If it's a pull back type, disable stop loss
                 pull_back_types = ['PBe1', 'PBe2', 'PBe1 (3)', 'PBe2 (3)']
-                if value.get("barType") in pull_back_types:
+                if bt in pull_back_types:
                     stopLoss[len(stopLoss) - 1].config(state="disabled")
                     stopLossValue[len(stopLossValue) - 1].config(state="disabled")
 
@@ -1406,21 +1582,21 @@ def addField(rowYPosition, initial_status_text=""):
     # Store previous index tracking (use a list to allow modification in closure)
     previous_index_storage = [stpLossEntry.current()]
     
-    # Ensure entry reflects the initial selection
-    _update_stop_loss_value_field(stpLossEntry, stopLossValueEntry, reset_value=False)
+    # Ensure entry reflects the initial selection (no modal on row create)
+    _update_stop_loss_value_field(stpLossEntry, stopLossValueEntry, reset_value=False, open_modal_if_custom=False)
     
     def on_stop_loss_change(event):
         combo = stpLossEntry
         value_entry = stopLossValueEntry
         current_selection = combo.get()
-        # If selecting Custom, store the previous index
-        if current_selection == "Custom":
-            # The previous index is what was stored before this change
+        canon_sl = _canonical_stop_loss_type(current_selection)
+        if canon_sl == "Custom":
             combo._previous_index = previous_index_storage[0]
         else:
-            # Update stored previous index for next time
-            previous_index_storage[0] = combo.current()
-        _update_stop_loss_value_field(combo, value_entry, reset_value=True)
+            idx = combo.current()
+            if idx >= 0:
+                previous_index_storage[0] = idx
+        _update_stop_loss_value_field(combo, value_entry, reset_value=True, open_modal_if_custom=True)
     
     stpLossEntry.bind("<<ComboboxSelected>>", on_stop_loss_change)
 
@@ -1442,42 +1618,49 @@ def addField(rowYPosition, initial_status_text=""):
     
     # Store previous index tracking for trade type (use a list to allow modification in closure)
     previous_trade_type_index = [tradeTypeEntry.current()]
+    pull_back_trade_types = ['PBe1', 'PBe2', 'PBe1e2', 'PBe1 (3)', 'PBe2 (3)']
     
     def on_trade_type_change(event):
         combo = tradeTypeEntry
         entry_points_entry = entry_pointValueEntry
         current_selection = combo.get()
-        
-        # For pull back trade types (PBe1, PBe2, PBe1 (3), PBe2 (3)): disable/hide stop loss dropdown
-        pull_back_types = ['PBe1', 'PBe2', 'PBe1e2', 'PBe1 (3)', 'PBe2 (3)']
-        if current_selection in pull_back_types:
-            # Disable stop loss dropdown for pull back types
+        canon_tt = _canonical_trade_type(current_selection)
+
+        if canon_tt in pull_back_trade_types:
             stpLossEntry.config(state="disabled")
             stopLossValueEntry.config(state="disabled")
         else:
-            # Re-enable stop loss dropdown for other trade types
             stpLossEntry.config(state="readonly")
             stopLossValueEntry.config(state="normal")
-        
-        # If selecting Limit Order or Custom, show entry price modal (ASK + 1/2 and BID - 1/2 use formula, no modal)
-        if current_selection in Config.manualOrderTypes and current_selection not in ('ASK + 1/2', 'BID - 1/2'):
-            # The previous index is what was stored before this change
+
+        if canon_tt in Config.manualOrderTypes and canon_tt not in ('ASK + 1/2', 'BID - 1/2'):
             combo._previous_index = previous_trade_type_index[0]
-            order_type_name = current_selection
-            _show_entry_price_modal(combo, entry_points_entry, order_type_name)
-        elif current_selection == "Conditional Order":
-            # The previous index is what was stored before this change
+            _show_entry_price_modal(combo, entry_points_entry, canon_tt)
+            previous_trade_type_index[0] = Config.entryTradeType.index(canon_tt)
+        elif canon_tt == "Conditional Order":
             combo._previous_index = previous_trade_type_index[0]
-            order_type_name = current_selection
-            _show_conditional_order_modal(combo, entry_points_entry, order_type_name)
+            _show_conditional_order_modal(combo, entry_points_entry, "Conditional Order")
+            previous_trade_type_index[0] = Config.entryTradeType.index("Conditional Order")
         else:
-            # Update stored previous index for next time
-            previous_trade_type_index[0] = combo.current()
-            # Reset entry points for non-manual order types
+            idx = combo.current()
+            if idx >= 0:
+                previous_trade_type_index[0] = idx
             entry_points_entry.delete(0, END)
             entry_points_entry.insert(0, "0")
     
     tradeTypeEntry.bind("<<ComboboxSelected>>", on_trade_type_change)
+
+    # Show saved custom/limit prices in the combo after load (dropdown uses canonical labels only)
+    _tt_init = _canonical_trade_type(tradeTypeEntry.get())
+    if _tt_init in ("Custom", "Limit Order"):
+        _set_trade_type_combo_display(tradeTypeEntry, _tt_init, entry_pointValueEntry.get())
+    elif _tt_init == "Conditional Order":
+        tradeTypeEntry.config(state="normal")
+        tradeTypeEntry.set("Conditional Order")
+        tradeTypeEntry.config(state="readonly")
+    if _tt_init in pull_back_trade_types:
+        stpLossEntry.config(state="disabled")
+        stopLossValueEntry.config(state="disabled")
 
     # 4) BUY / SELL (column 3)
     buysellEntry = ttk.Combobox(field, state="readonly", width="10", value=Config.buySell)
@@ -1575,12 +1758,29 @@ def addField(rowYPosition, initial_status_text=""):
     optionEnabled.append(False)  # Initialize option as disabled
     optionButtonList.append(optionButton)
     optionButton['command'] = lambda idx=row_index_for_option: _toggle_option_fields(idx)
-    optionContract.append(StringVar(field, ""))  # Store contract (strike selection code)
-    optionExpire.append(StringVar(field, ""))  # Store expiration selection
-    optionEntryOrderType.append(StringVar(field, "Market"))  # Default entry order type
-    optionStopLossOrderType.append(StringVar(field, "Market"))  # Default stop loss order type
-    optionProfitOrderType.append(StringVar(field, "Market"))  # Default profit order type
-    optionRiskAmount.append(StringVar(field, ""))  # Default risk amount (blank = use share quantity)
+    _od = Config.defaultValue
+    _opt_strike = str(_od.get("optStrike") or "").strip()
+    _opt_expire_raw = _od.get("optExpire", "")
+    _opt_expire = str(_opt_expire_raw).strip() if _opt_expire_raw is not None else ""
+
+    def _norm_opt_ot(key, fallback="Market"):
+        v = _od.get(key, fallback)
+        if v not in Config.optionOrderTypes:
+            return fallback
+        return v
+
+    _opt_eot = _norm_opt_ot("optEntryOT")
+    _opt_sot = _norm_opt_ot("optSlOT")
+    _opt_tot = _norm_opt_ot("optTpOT")
+    _opt_risk = _od.get("optRisk")
+    _opt_risk_s = "" if _opt_risk is None else str(_opt_risk).strip()
+
+    optionContract.append(StringVar(field, _opt_strike))
+    optionExpire.append(StringVar(field, _opt_expire))
+    optionEntryOrderType.append(StringVar(field, _opt_eot))
+    optionStopLossOrderType.append(StringVar(field, _opt_sot))
+    optionProfitOrderType.append(StringVar(field, _opt_tot))
+    optionRiskAmount.append(StringVar(field, _opt_risk_s))
     
     # 14) STATUS (column 13)
     statusVar = StringVar(field)
