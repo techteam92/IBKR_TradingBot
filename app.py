@@ -5,6 +5,7 @@ from IBConnection import connection
 from Config import app_version,tradingTime, pullBackNo
 from StatusSaveInFile import *
 from SendTrade import SendTrade, _get_current_session
+from HotKeyMap import HotKeyMap
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from api_routes import init_api_routes
@@ -74,6 +75,7 @@ class TkApp:
         menubar = Menu(self.frame, borderwidth=1, bg="#20232A")
         menubar.add_command(label="Manage Position", command=self.openManagePosition)
         menubar.add_command(label="Setting", command=self.Setting)
+        menubar.add_command(label="Hot Keys", command=self.HotKeys)
         menubar.add_command(label="Exit", command=self.close_window)
         self.frame.config(menu=menubar)
         loadCache(self.connection)
@@ -108,6 +110,9 @@ class TkApp:
 
     def Setting(self):
         DefaultSetting(self.connection)
+
+    def HotKeys(self):
+        HotKeyMap()
 
     def connectionCheck(self):
         loop = 1

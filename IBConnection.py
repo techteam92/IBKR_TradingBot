@@ -191,8 +191,15 @@ class connection:
                         and 0 <= lb3_index < len(Config.entryTradeType)
                         and bar_type == Config.entryTradeType[lb3_index]
                     )
-                    if is_lb or is_lb2 or is_lb3:
-                        should_send_tp_sl = is_extended_hours  # LB/LB2/LB3 use bracket orders in RTH, separate orders in extended hours
+                    if is_lb:
+                        # LB uses bracket orders in RTH; TP/SL are sent separately in extended hours.
+                        should_send_tp_sl = is_extended_hours
+                    elif is_lb2:
+                        # LB2 uses bracket orders in RTH; TP/SL are sent separately in extended hours.
+                        should_send_tp_sl = is_extended_hours
+                    elif is_lb3:
+                        # LB3 remains entry-first behavior.
+                        should_send_tp_sl = True
                     else:
                         should_send_tp_sl = True  # Other trade types always need sendTpAndSl
             
