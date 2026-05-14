@@ -6,6 +6,8 @@ from Config import app_version,tradingTime, pullBackNo
 from StatusSaveInFile import *
 from SendTrade import SendTrade, _get_current_session
 from HotKeyMap import HotKeyMap
+from BreakoutScannerFrame import BreakoutScannerFrame
+from LogViewerFrame import LogViewerFrame
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from api_routes import init_api_routes
@@ -76,6 +78,8 @@ class TkApp:
         menubar.add_command(label="Manage Position", command=self.openManagePosition)
         menubar.add_command(label="Setting", command=self.Setting)
         menubar.add_command(label="Hot Keys", command=self.HotKeys)
+        menubar.add_command(label="Scanner", command=self.OpenScanner)
+        menubar.add_command(label="Log Viewer", command=self.OpenLogViewer)
         menubar.add_command(label="Exit", command=self.close_window)
         self.frame.config(menu=menubar)
         loadCache(self.connection)
@@ -113,6 +117,12 @@ class TkApp:
 
     def HotKeys(self):
         HotKeyMap()
+
+    def OpenScanner(self):
+        BreakoutScannerFrame(self.connection)
+
+    def OpenLogViewer(self):
+        LogViewerFrame()
 
     def connectionCheck(self):
         loop = 1

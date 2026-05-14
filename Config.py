@@ -26,6 +26,7 @@ durationStr="1 D"
 entryLastDataNo=[1,2,3]
 # tradingTime='09:30:00'
 outsideRthTradingtime='09:30:00'
+
 #  in manage position it is working
 LB1_PBe1_time='09:30:00'
 
@@ -73,7 +74,7 @@ timeInForce=['DAY','OTH','GTC']
 # recet bar [rb, recent bar BY Bar]
 # pullbacj divide in two -------------  new pbe1 (close second trade)   new e2   old pbe1e2
 manualOrderTypes = ['Custom','Limit Order','ASK + 1/2','BID - 1/2']
-entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','LB','LB2','LB3','PBe1 (3)','PBe2 (3)']
+entryTradeType=manualOrderTypes + ['Conditional Order','FB','RB','RBB','PBe1','PBe2','LB','LB2','LB3','PBe1 (3)','PBe2 (3)','BO e1','BO e2']
 # Indices into entryTradeType for bar-based strategies (0-3 = manual types, 4+ = bar/conditional)
 CONDITIONAL_ORDER_INDEX = 4
 FB_INDEX = 5
@@ -86,6 +87,12 @@ LB2_INDEX = 11
 LB3_INDEX = 12
 PBe1_3_INDEX = 13   # PBe1 with 3 consecutive green (long) or red (short) bars required
 PBe2_3_INDEX = 14   # PBe2 with 3 consecutive green (long) or red (short) bars required
+BOe1_INDEX = 15     # 5-bar consolidation breakout - first breakout entry
+BOe2_INDEX = 16     # 5-bar consolidation breakout - second breakout (retest) entry
+
+# BO e1 / BO e2: ATR % options used as multiplier of ATR(14) on 5-min for base_range filter
+bo_atr_options = ['7%', '10%', '15%', '20%', '50%', '75%', '100%', '125%', '150%']
+bo_default_atr = '20%'
 buySell=['BUY','SELL']
 prePostBool=[False,True]
 breakEven =[False,True]
@@ -104,6 +111,16 @@ roundVal=2
 optionOrderTypes = ['Market', 'Bid+', 'Ask-']
 optionRiskAmount = []
 pending_option_orders = {}  # Store pending orders that couldn't be placed because condition was already met
+
+
+# 5-Bar Consolidation Breakout Scanner defaults (additive; do not affect existing logic)
+scanner_default_symbols = "AAPL,TSLA,NVDA,SPY,PLTR"
+scanner_atr_factor = 0.75       # base_range <= atr_factor * ATR(14)
+scanner_body_factor = 0.50      # avg(|close-open|) <= body_factor * avg(high-low)
+scanner_require_volume_decline = False
+scanner_require_above_vwap = False
+scanner_timeframe = "5 mins"    # fixed per spec
+scanner_duration = "1 D"        # historical lookback for ATR + base + breakout
 
 
 

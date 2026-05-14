@@ -191,7 +191,20 @@ class connection:
                         and 0 <= lb3_index < len(Config.entryTradeType)
                         and bar_type == Config.entryTradeType[lb3_index]
                     )
-                    if is_lb:
+                    # BO e1 / BO e2: bracket (entry + TP + SL) is always
+                    # sent up-front by BreakoutTrade. Never re-send TP/SL
+                    # after fill - that would duplicate the legs in TWS.
+                    is_bo = (
+                        bar_type in (
+                            Config.entryTradeType[Config.BOe1_INDEX]
+                            if 0 <= Config.BOe1_INDEX < len(Config.entryTradeType) else None,
+                            Config.entryTradeType[Config.BOe2_INDEX]
+                            if 0 <= Config.BOe2_INDEX < len(Config.entryTradeType) else None,
+                        )
+                    )
+                    if is_bo:
+                        should_send_tp_sl = False
+                    elif is_lb:
                         # LB uses bracket orders in RTH; TP/SL are sent separately in extended hours.
                         should_send_tp_sl = is_extended_hours
                     elif is_lb2:
@@ -203,10 +216,10 @@ class connection:
                     else:
                         should_send_tp_sl = True  # Other trade types always need sendTpAndSl
             
-            logging.info("orderStatusEvent: should_send_tp_sl=%s (barType != entryTradeType[3] (FB): %s, not (is_manual_order and not is_extended_hours): %s)",
-                        should_send_tp_sl, 
-                        bar_type != Config.entryTradeType[3],
-                        not (is_manual_order and not is_extended_hours))
+            logging.info(
+                "orderStatusEvent: should_send_tp_sl=%s (bar_type=%s, is_manual_order=%s, is_extended_hours=%s)",
+                should_send_tp_sl, bar_type, is_manual_order, is_extended_hours,
+            )
 
             # ------------------------------------------------------------------
             # Immediate recovery for manual Custom brackets on Duplicate order id

@@ -1487,20 +1487,17 @@ async def manual_limit_order(connection, symbol, timeFrame, profit, stopLoss, ri
                         logging.error("Custom stop loss (%s) must be above entry price (%s) for SELL orders", custom_stop, entry_price)
                         return
                 # Calculate stop_size directly (similar to ATR): stop_size = |entry - custom_stop|
-                # For ASK + 1/2 / BID - 1/2, entry_price passed here is the computed LIMIT price.
-                # But the intended "risk reference" is the ASK/BID used to build that limit:
-                #   limit = reference + (reference - stop) / 2  =>  reference = (2*limit + stop) / 3
-                # Therefore, derive stop_size from reference (so share size uses ASK/BID, not limit).
+                # For ASK + 1/2 / BID - 1/2, entry_price is the computed LIMIT price. The order
+                # will fill at or better than LIMIT, so worst-case risk is |LIMIT - custom_stop|.
+                # Use this entry-based distance consistently for qty AND TP so R:R is honored at the
+                # worst-case fill price.
+                stop_size = abs(entry_price - custom_stop)
                 if barType in ('ASK + 1/2', 'BID - 1/2'):
-                    reference_price = (2 * float(entry_price) + float(custom_stop)) / 3.0
-                    stop_size = abs(reference_price - float(custom_stop))
                     stop_loss_price = round(custom_stop, Config.roundVal)  # keep SL at the user custom stop
                     logging.info(
-                        "Custom stop (ASK/BID half): derived reference_price=%s from limit=%s and stop=%s; stop_size=%s",
-                        reference_price, entry_price, custom_stop, stop_size
+                        "Custom stop (ASK/BID half): limit=%s, custom_stop=%s, stop_size=%s (= |limit - stop|)",
+                        entry_price, custom_stop, stop_size
                     )
-                else:
-                    stop_size = abs(entry_price - custom_stop)
                 if stop_size == 0 or math.isnan(stop_size):
                     logging.error("Stop size invalid (%s) for custom stop loss %s limit order %s", stop_size, custom_stop, symbol)
                     return
@@ -2474,6 +2471,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 action="SELL" if buySellType == "BUY" else "BUY",
                 totalQuantity=qty,
                 lmtPrice=tp_price,
+                tif=tif,
                 parentId=parent_order_id,
                 transmit=False
             )
@@ -2485,6 +2483,7 @@ async def manual_stop_order(connection, symbol, timeFrame, profit, stopLoss, ris
                 action="SELL" if buySellType == "BUY" else "BUY",
                 totalQuantity=qty,
                 auxPrice=round(stop_loss_price, Config.roundVal),  # Stop price
+                tif=tif,
                 parentId=parent_order_id,
                 transmit=True  # Last order transmits all
             )
@@ -5695,6 +5694,20 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
                                   atrPercentage, quantity, pullBackNo, slValue, breakEven, outsideRth, entry_points))
             if isinstance(result, dict) and result.get("status") == "ATR_BLOCKED":
                 return result
+        elif (len(Config.entryTradeType) > Config.BOe1_INDEX
+              and barType == Config.entryTradeType[Config.BOe1_INDEX]):  # BO e1
+            logging.debug("Routing to bo_e1 for barType='%s'", barType)
+            from BreakoutTrade import bo_e1
+            await bo_e1(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType,
+                        buySellType, atrPercentage, quantity, pullBackNo, slValue, breakEven,
+                        outsideRth, entry_points)
+        elif (len(Config.entryTradeType) > Config.BOe2_INDEX
+              and barType == Config.entryTradeType[Config.BOe2_INDEX]):  # BO e2
+            logging.debug("Routing to bo_e2 for barType='%s'", barType)
+            from BreakoutTrade import bo_e2
+            await bo_e2(connection, symbol, timeFrame, profit, stopLoss, risk, tif, barType,
+                        buySellType, atrPercentage, quantity, pullBackNo, slValue, breakEven,
+                        outsideRth, entry_points)
 
         logging.debug("task done for %s symbol",symbol)
 
@@ -5924,6 +5937,31 @@ def _calculate_manual_stop_loss(connection, contract, entry_price, stopLoss, buy
     
     bar_high = float(histData.get('high', 0))
     bar_low = float(histData.get('low', 0))
+    
+    # ATR-based stop loss (10% ATR, 15% ATR, 20% ATR, 25% ATR, 33% ATR, 50% ATR)
+    # Stop sits at entry_price ± (ATR × percent). For ASK/BID half this helper is called
+    # with entry_price = ASK/BID reference, so the returned stop becomes the reference
+    # the LIMIT formula needs (limit = ref ± (ref - stop)/2).
+    if stopLoss in Config.atrStopLossMap:
+        atr_offset = _get_atr_stop_offset(connection, contract, stopLoss)
+        if atr_offset is None or math.isnan(atr_offset) or atr_offset <= 0:
+            logging.warning("ATR offset unavailable for %s (%s), falling back to EntryBar logic", stopLoss, contract)
+            if buySellType == 'BUY':
+                stop_loss_price = bar_low
+            else:
+                stop_loss_price = bar_high
+            stop_size = (bar_high - bar_low) + Config.add002
+        else:
+            if buySellType == 'BUY':
+                stop_loss_price = entry_price - atr_offset
+            else:  # SELL
+                stop_loss_price = entry_price + atr_offset
+            stop_size = atr_offset
+            logging.info("Manual ATR (%s): entry=%s, ATR_offset=%s, stop=%s, stop_size=%s",
+                         stopLoss, entry_price, atr_offset, stop_loss_price, stop_size)
+        stop_loss_price = round(stop_loss_price, Config.roundVal)
+        stop_size = round(stop_size, Config.roundVal)
+        return stop_loss_price, stop_size
     
     if stopLoss == Config.stopLoss[0]:  # EntryBar
         # EntryBar: stop = low (long) or high (short), stop_size = high-low+0.02

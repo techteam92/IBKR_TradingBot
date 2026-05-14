@@ -173,6 +173,90 @@ def _show_entry_price_modal(trade_type_combo, entry_points_entry, order_type_nam
     # Wait for modal to close
     modal.wait_window()
 
+def _show_bo_modal(trade_type_combo, entry_points_entry, order_type_name):
+    """Modal for BO e1 / BO e2 - collects ATR% (base range filter) and Trigger Price.
+
+    Stored in entry_points as "<atr_pct>,<trigger_price>" (e.g. "10,200").
+    LONG only trades if current price >= trigger; SHORT only if current price <= trigger.
+    Trigger 0 disables the price filter.
+    """
+    parent = trade_type_combo.winfo_toplevel()
+    modal = tkinter.Toplevel(parent)
+    modal.title(f"{order_type_name} - Parameters")
+    modal.geometry("380x240")
+    modal.resizable(False, False)
+    modal.transient(parent)
+    modal.grab_set()
+    modal.update_idletasks()
+    x = (modal.winfo_screenwidth() // 2) - (380 // 2)
+    y = (modal.winfo_screenheight() // 2) - (240 // 2)
+    modal.geometry(f"380x240+{x}+{y}")
+
+    current = entry_points_entry.get() if entry_points_entry.get() else f"{Config.bo_default_atr.rstrip('%')},0"
+    parts = current.split(",")
+    cur_atr = parts[0] if parts and parts[0] else Config.bo_default_atr.rstrip('%')
+    cur_trig = parts[1] if len(parts) > 1 and parts[1] else "0"
+
+    previous_index = getattr(trade_type_combo, '_previous_index', 0)
+
+    Label(modal, text=f"{order_type_name} parameters",
+          font=(Config.fontName2, Config.fontSize2, "bold")).pack(pady=(10, 6))
+
+    f1 = Frame(modal)
+    f1.pack(fill=X, padx=15, pady=4)
+    Label(f1, text="ATR % (base range):", font=(Config.fontName2, Config.fontSize2),
+          width=22, anchor="w").pack(side=LEFT)
+    atr_var = StringVar(modal)
+    pre = f"{cur_atr}%"
+    atr_combo = ttk.Combobox(f1, textvariable=atr_var, state="readonly",
+                              width=10, values=Config.bo_atr_options)
+    atr_combo.set(pre if pre in Config.bo_atr_options else Config.bo_default_atr)
+    atr_combo.pack(side=LEFT)
+
+    f2 = Frame(modal)
+    f2.pack(fill=X, padx=15, pady=4)
+    Label(f2, text="Trigger Price (X):", font=(Config.fontName2, Config.fontSize2),
+          width=22, anchor="w").pack(side=LEFT)
+    trig_var = StringVar(modal, value=cur_trig)
+    trig_entry = Entry(f2, textvariable=trig_var, width=12,
+                        font=(Config.fontName2, Config.fontSize2))
+    trig_entry.pack(side=LEFT)
+
+    Label(modal,
+          text="LONG: trade only if price >= trigger.\nSHORT: trade only if price <= trigger.\nTrigger = 0 disables the filter.",
+          font=(Config.fontName2, max(8, Config.fontSize2 - 2)),
+          fg="#555", justify=LEFT).pack(pady=(8, 4), padx=15, anchor="w")
+
+    def save():
+        try:
+            atr_pct = atr_var.get().rstrip('%').strip() or "10"
+            int(atr_pct)
+            trig = trig_var.get().strip() or "0"
+            float(trig)
+            entry_points_entry.delete(0, END)
+            entry_points_entry.insert(0, f"{atr_pct},{trig}")
+            _set_trade_type_combo_display(trade_type_combo, order_type_name, entry_points_entry.get())
+            modal.destroy()
+        except ValueError:
+            tkinter.messagebox.showerror("Invalid Input", "Please enter valid numbers for ATR % and Trigger Price.")
+            trig_entry.focus()
+
+    def cancel():
+        modal.destroy()
+        try:
+            trade_type_combo.current(previous_index)
+        except Exception:
+            pass
+
+    btnf = Frame(modal)
+    btnf.pack(pady=10)
+    Button(btnf, text="OK", width=8, command=save).pack(side=LEFT, padx=5)
+    Button(btnf, text="Cancel", width=8, command=cancel).pack(side=LEFT, padx=5)
+    trig_entry.bind("<Return>", lambda e: save())
+    trig_entry.bind("<Escape>", lambda e: cancel())
+    modal.wait_window()
+
+
 def _show_conditional_order_modal(trade_type_combo, entry_points_entry, order_type_name):
     """
     Show a modal dialog to enter conditional order parameters.
@@ -1619,6 +1703,8 @@ def addField(rowYPosition, initial_status_text=""):
     # Store previous index tracking for trade type (use a list to allow modification in closure)
     previous_trade_type_index = [tradeTypeEntry.current()]
     pull_back_trade_types = ['PBe1', 'PBe2', 'PBe1e2', 'PBe1 (3)', 'PBe2 (3)']
+    bo_trade_types = ['BO e1', 'BO e2']
+    fixed_sl_trade_types = set(pull_back_trade_types) | set(bo_trade_types)
     
     def on_trade_type_change(event):
         combo = tradeTypeEntry
@@ -1626,7 +1712,7 @@ def addField(rowYPosition, initial_status_text=""):
         current_selection = combo.get()
         canon_tt = _canonical_trade_type(current_selection)
 
-        if canon_tt in pull_back_trade_types:
+        if canon_tt in fixed_sl_trade_types:
             stpLossEntry.config(state="disabled")
             stopLossValueEntry.config(state="disabled")
         else:
@@ -1641,6 +1727,10 @@ def addField(rowYPosition, initial_status_text=""):
             combo._previous_index = previous_trade_type_index[0]
             _show_conditional_order_modal(combo, entry_points_entry, "Conditional Order")
             previous_trade_type_index[0] = Config.entryTradeType.index("Conditional Order")
+        elif canon_tt in bo_trade_types:
+            combo._previous_index = previous_trade_type_index[0]
+            _show_bo_modal(combo, entry_points_entry, canon_tt)
+            previous_trade_type_index[0] = Config.entryTradeType.index(canon_tt)
         else:
             idx = combo.current()
             if idx >= 0:
@@ -1658,7 +1748,7 @@ def addField(rowYPosition, initial_status_text=""):
         tradeTypeEntry.config(state="normal")
         tradeTypeEntry.set("Conditional Order")
         tradeTypeEntry.config(state="readonly")
-    if _tt_init in pull_back_trade_types:
+    if _tt_init in pull_back_trade_types or _tt_init in bo_trade_types:
         stpLossEntry.config(state="disabled")
         stopLossValueEntry.config(state="disabled")
 
