@@ -78,6 +78,18 @@ def _is_extended_outside_rth(outsideRth: bool):
     return is_extended, session
 
 
+def _effective_outside_rth_for_tp_sl(stored_outside_rth):
+    """Return outsideRth to use when placing TP/SL after an entry fill.
+
+    If the fill occurs during RTH, force False so child orders use RTH routing
+    (e.g. STP instead of extended-hours STP LMT) even when the entry was placed
+    premarket/OTH with outsideRth=True.
+    """
+    if _get_current_session() == 'RTH':
+        return False
+    return bool(stored_outside_rth)
+
+
 def _calculate_stop_limit_offsets(histData):
     """
     Calculate the stop size along with entry and protection limit offsets based on
@@ -6910,9 +6922,21 @@ def sendTpAndSl(connection, entryData):
                 logging.debug("sendTpAndSl: Marked TP/SL as sent for orderId=%s, barType=%s", order_id, entryData.get('barType'))
             bar_type = entryData.get('barType', '')
             is_manual_order = bar_type in Config.manualOrderTypes
-            is_extended_hours = entryData.get('outsideRth', False)
-            logging.info("Entry order filled - barType=%s, is_manual_order=%s, is_extended_hours=%s, action=%s, orderId=%s", 
-                        bar_type, is_manual_order, is_extended_hours, entryData.get('action'), entryData.get('orderId'))
+            stored_oth = bool(entryData.get('outsideRth', False))
+            eff_oth = _effective_outside_rth_for_tp_sl(stored_oth)
+            if eff_oth != stored_oth:
+                logging.info(
+                    "sendTpAndSl: fill-time session=%s — TP/SL outsideRth %s -> %s (entry was placed outside RTH)",
+                    _get_current_session(), stored_oth, eff_oth,
+                )
+            entryData['outsideRth'] = eff_oth
+            if order_id is not None and order_id in Config.orderStatusData:
+                Config.orderStatusData[order_id]['outsideRth'] = eff_oth
+            is_extended_hours, _fill_sess = _is_extended_outside_rth(entryData['outsideRth'])
+            logging.info(
+                "Entry order filled - barType=%s, is_manual_order=%s, is_extended_hours=%s, session=%s, action=%s, orderId=%s",
+                bar_type, is_manual_order, is_extended_hours, _fill_sess, entryData.get('action'), entryData.get('orderId'),
+            )
             
             # For RBB in extended hours: Cancel protection order if it exists (TP/SL orders will replace it)
             if bar_type == Config.entryTradeType[Config.RBB_INDEX] and is_extended_hours:  # RBB in extended hours

@@ -309,8 +309,13 @@ def api_place_order():
             }), 400
         
         tif = data.get('timeInForce', 'DAY').strip().upper()
-        if tif not in ['DAY', 'OTH', 'GTC']:
-            return jsonify({'success': False, 'error': 'Time in force must be DAY, OTH, or GTC'}), 400
+        if tif not in ['DAY', 'OTH', 'OTH-1', 'GTC']:
+            return jsonify({'success': False, 'error': 'Time in force must be DAY, OTH, OTH-1, or GTC'}), 400
+        if tif == 'OTH-1':
+            return jsonify({
+                'success': False,
+                'error': 'OTH-1 (next premarket) is scheduled from the trading UI only; use OTH for API orders.',
+            }), 400
         
         risk = data.get('risk', '').strip()
         if not risk:

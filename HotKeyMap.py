@@ -147,6 +147,7 @@ def HotKeyMap():
             [
                 ("Shift + O", "OTH"),
                 ("Shift + D", "DAY"),
+                ("—", "OTH-1: next 04:00 ET premarket (overnight only)"),
             ],
         ),
     ]

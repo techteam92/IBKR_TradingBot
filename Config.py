@@ -68,7 +68,7 @@ atrStopLossMap = {
 '33% ATR':0.33,
 '50% ATR':0.50
 }
-timeInForce=['DAY','OTH','GTC']
+timeInForce=['DAY','OTH','OTH-1','GTC']
 
 # recent rbb
 # recet bar [rb, recent bar BY Bar]

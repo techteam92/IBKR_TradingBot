@@ -793,6 +793,38 @@ def _get_current_session():
         return 'AFTERHOURS'
     return 'OVERNIGHT'
 
+
+def _seconds_until_next_premarket_open():
+    """Seconds until next US premarket open (04:00 ET). Used by OTH-1 scheduling.
+
+    If already in PREMARKET, returns 0 (submit immediately as OTH).
+    Skips Saturday/Sunday so Friday overnight targets Monday 04:00.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo('US/Eastern')
+        now = datetime.datetime.now(tz)
+    except Exception:
+        tz = None
+        now = datetime.datetime.now()
+
+    pre_start = datetime.time(4, 0, 0)
+    rth_start = datetime.time(9, 30, 0)
+    now_t = now.time().replace(microsecond=0)
+
+    if pre_start <= now_t < rth_start:
+        return 0
+
+    target = datetime.datetime.combine(now.date(), pre_start)
+    if tz:
+        target = target.replace(tzinfo=tz)
+    if now >= target:
+        target = target + datetime.timedelta(days=1)
+    while target.weekday() >= 5:
+        target = target + datetime.timedelta(days=1)
+    return max(0, int((target - now).total_seconds()))
+
+
 def checkLastTradingTime():
     """Check if trading is closed - only blocks during regular hours after trading end"""
     currentTime = datetime.datetime.now()
@@ -961,6 +993,41 @@ def execute_row(row_index):
     logging.debug("Execute row %s detected session: %s, outsideRth: %s", row_index, session, outsideRth)
 
     current_tif = timeInForce[row_index].get()
+    schedule_oth1_premarket = False
+    oth1_delay_sec = 0
+
+    # OTH-1: arm overnight, submit at next premarket (04:00 ET) as OTH (outsideRth=True).
+    # SendTrade is unchanged; scheduler passes tif='OTH' when the wait completes.
+    if current_tif == 'OTH-1':
+        if session == 'OVERNIGHT':
+            oth1_delay_sec = _seconds_until_next_premarket_open()
+            schedule_oth1_premarket = True
+            _set_status(row_index, "Scheduled 04:00")
+            tkinter.messagebox.showinfo(
+                'Scheduled (OTH-1)',
+                f"Current session is {session}.\n\n"
+                f"Time in Force is OTH-1 (next premarket).\n\n"
+                f"Order will be submitted automatically at 04:00 ET premarket "
+                f"using OTH / outside regular hours."
+            )
+            logging.info(
+                "Row %s: session=%s, TIF=OTH-1 -> scheduling SendTrade(OTH) for premarket in %ss",
+                row_index, session, oth1_delay_sec,
+            )
+        elif session == 'PREMARKET':
+            logging.info(
+                "Row %s: TIF=OTH-1 during PREMARKET -> submitting immediately as OTH",
+                row_index,
+            )
+        else:
+            tkinter.messagebox.showerror(
+                'OTH-1 not available',
+                f"OTH-1 is for overnight entry only (submit at next 04:00 ET premarket).\n\n"
+                f"Current session: {session}.\n\n"
+                f"Use OTH for immediate extended-hours orders, or DAY for regular hours."
+            )
+            return
+
     # Premarket behavior: if user selects DAY, schedule submit for 09:30 ET (market open).
     # This avoids changing SendTrade logic and avoids warnings for the intended workflow.
     if outsideRth and current_tif == 'DAY':
@@ -991,7 +1058,7 @@ def execute_row(row_index):
         logging.info("Row %s: session=%s, TIF=DAY -> scheduling SendTrade for 09:30 ET in %ss", row_index, session, delay_sec)
     else:
         # When in extended hours but user chose Day/GTC, keep existing warning behavior
-        if outsideRth and current_tif != 'OTH':
+        if outsideRth and current_tif not in ('OTH', 'OTH-1') and not schedule_oth1_premarket:
             tkinter.messagebox.showwarning(
                 'Session / Time in Force',
                 f"Current session is {session} (extended hours).\n\n"
@@ -1001,7 +1068,7 @@ def execute_row(row_index):
             logging.warning(
                 f"Row {row_index}: session={session}, Time in Force='{current_tif}' (consider OTH for extended hours); allowing trade.")
 
-    if not (outsideRth and current_tif == 'DAY'):
+    if not (outsideRth and current_tif == 'DAY') and not schedule_oth1_premarket:
         _set_status(row_index, "Sent")
         _log_snapshot_for_row(row_index)
 
@@ -1060,6 +1127,39 @@ def execute_row(row_index):
         atr_value_for_send = atr[row_index].get().strip()
 
     async def _send_now_or_at_rth_open():
+        # OTH-1 overnight: wait until 04:00 ET premarket, then submit as OTH.
+        if schedule_oth1_premarket:
+            await asyncio.sleep(oth1_delay_sec)
+            logging.info(
+                "Row %s: submitting scheduled OTH-1 order at/after premarket (tif=OTH)",
+                row_index,
+            )
+            return await SendTrade(
+                IbConn,
+                symbol[row_index].get(),
+                timeFrame[row_index].get(),
+                takeProfit[row_index].get(),
+                stop_loss_canon,
+                risk[row_index].get(),
+                'OTH',
+                trade_type_canon,
+                buySell[row_index].get(),
+                atr_value_for_send,
+                0,
+                Config.pullBackNo,
+                current_sl_value,
+                breakEven[row_index].get(),
+                True,
+                entry_points[row_index].get(),
+                is_option_enabled,
+                option_contract,
+                option_expire,
+                option_entry_order_type,
+                option_sl_order_type,
+                option_tp_order_type,
+                option_risk_amount,
+            )
+
         # If scheduled for 09:30 ET, wait then submit as regular-hours (outsideRth=False) with TIF=DAY.
         if outsideRth and current_tif == 'DAY':
             await asyncio.sleep(delay_sec)
@@ -1091,6 +1191,9 @@ def execute_row(row_index):
             )
 
         # Default: submit immediately with current flags
+        tif_for_send = timeInForce[row_index].get()
+        if tif_for_send == 'OTH-1':
+            tif_for_send = 'OTH'
         return await SendTrade(
             IbConn,
             symbol[row_index].get(),
@@ -1098,7 +1201,7 @@ def execute_row(row_index):
             takeProfit[row_index].get(),
             stop_loss_canon,
             risk[row_index].get(),
-            timeInForce[row_index].get(),
+            tif_for_send,
             trade_type_canon,
             buySell[row_index].get(),
             atr_value_for_send,
