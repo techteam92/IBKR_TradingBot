@@ -7,8 +7,9 @@ Per spec from client:
 - LONG stop = base_low, SHORT stop = base_high
 - TP uses existing 1:1 / 1.5:1 / 2:1 / 2.5:1 / 3:1 multipliers (from row's profit)
 - Trigger price filter X: LONG only if current price >= X, SHORT only if current price <= X
-- Sessions: DAY and OTH (extended hours), NOT overnight
-- Entry order: STP (RTH) or STP LMT (extended), matches existing LB/RB pattern
+- Sessions: premarket, RTH, and after-hours with TIF DAY or OTH; NOT overnight (8pm–4am ET)
+- Entry order: STP when in regular session; STP LMT when outsideRth / extended (OTH)
+- Pattern bars: 5-min candles from IB useRTH feed (historical RTH 5-min bars, not 1-min premarket)
 - BO e1: trade the first breakout
 - BO e2: wait for first breakout + retest + second breakout, then trade
 """

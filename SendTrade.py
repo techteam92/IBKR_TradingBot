@@ -35,17 +35,48 @@ def getContract(symbol,currency):
 
 
 def getSleepTime(timeFrame, outsideRth=False):
+    """Seconds to sleep before the next price/bar check.
+
+    RTH (outsideRth=False): wait until Config.tradingTime (+ one bar) if before open.
+    OTH (outsideRth=True): during premarket/after-hours poll every bar period; only sleep
+    until 04:00 ET when still in overnight. Do not sleep until 09:30 during premarket.
+    """
+    secOfTimeFrame = Config.timeDict.get(timeFrame) or 60
+    try:
+        from zoneinfo import ZoneInfo
+        now_dt = datetime.datetime.now(ZoneInfo('US/Eastern'))
+    except Exception:
+        now_dt = datetime.datetime.now()
+    now_t = now_dt.time().replace(microsecond=0)
+    pre_start = datetime.time(4, 0, 0)
+    rth_start = datetime.time(9, 30, 0)
+    rth_end = datetime.time(16, 0, 0)
+    after_end = datetime.time(20, 0, 0)
+
+    if outsideRth:
+        if pre_start <= now_t < rth_start or rth_end <= now_t < after_end:
+            return secOfTimeFrame
+        if rth_start <= now_t < rth_end:
+            return 0
+        # OVERNIGHT: sleep until next 04:00 ET premarket (skip weekends)
+        target = datetime.datetime.combine(now_dt.date(), pre_start)
+        if hasattr(now_dt, 'tzinfo') and now_dt.tzinfo is not None:
+            target = target.replace(tzinfo=now_dt.tzinfo)
+        if now_dt >= target:
+            target = target + datetime.timedelta(days=1)
+        while target.weekday() >= 5:
+            target = target + datetime.timedelta(days=1)
+        return max(1, int((target - now_dt).total_seconds()))
+
     conf_trading_time = accordingRthTradingTimeCalculate(outsideRth)
     configTime = datetime.datetime.strptime(conf_trading_time, "%H:%M:%S")
-    configTime = datetime.datetime.combine(datetime.datetime.now().date(), configTime.time())
-    # It will add timeframe in config trading time
-    secOfTimeFrame = Config.timeDict.get(timeFrame)
-    configTime = (configTime + datetime.timedelta(seconds=(secOfTimeFrame)))
-    #  it will change date. changed date into current date
-    if(datetime.datetime.now().time() < configTime.time()):
-        return (configTime - datetime.datetime.now()).total_seconds()
-    else:
-        return 0
+    configTime = datetime.datetime.combine(now_dt.date(), configTime.time())
+    if hasattr(now_dt, 'tzinfo') and now_dt.tzinfo is not None:
+        configTime = configTime.replace(tzinfo=now_dt.tzinfo)
+    configTime = configTime + datetime.timedelta(seconds=secOfTimeFrame)
+    if now_dt < configTime:
+        return max(0, (configTime - now_dt).total_seconds())
+    return 0
 
 
 
@@ -62,6 +93,26 @@ def accordingRthTradingTimeCalculate(outsideRth=False):
     if outsideRth:
         conf_trading_time = Config.outsideRthTradingtime
     return conf_trading_time
+
+
+def _bar_strategy_sl_tp_base_price(entryData, entry_stop_price, filled_price):
+    """Base for RB/RBB/LB TP/SL: entry trigger (aux/stop), same as TP — not fill price."""
+    bar_type = entryData.get('barType')
+    trigger_bar_types = (
+        Config.entryTradeType[Config.CONDITIONAL_ORDER_INDEX],
+        Config.entryTradeType[Config.FB_INDEX],
+        Config.entryTradeType[Config.RB_INDEX],
+        Config.entryTradeType[Config.RBB_INDEX],
+        Config.entryTradeType[Config.LB_INDEX],
+        Config.entryTradeType[Config.LB2_INDEX],
+        Config.entryTradeType[Config.LB3_INDEX],
+    )
+    if bar_type in trigger_bar_types:
+        return float(entry_stop_price)
+    is_extended, _ = _is_extended_outside_rth(entryData.get('outsideRth', False))
+    if is_extended:
+        return float(entry_stop_price)
+    return float(filled_price)
 
 
 def _is_extended_outside_rth(outsideRth: bool):
@@ -552,8 +603,10 @@ async def get_first_chart_time_lb(config_tradingTime, timeFrame ,outsideRth=Fals
         await  asyncio.sleep(sec)
         return chartTime
     else:
-        chartTime = datetime.datetime.strptime(conf_trading_time, "%H:%M:%S")
-        return chartTime
+        if isinstance(conf_trading_time, datetime.datetime):
+            return conf_trading_time
+        t = datetime.datetime.strptime(str(conf_trading_time), "%H:%M:%S").time()
+        return datetime.datetime.combine(datetime.datetime.now().date(), t)
 
 async def get_first_chart_time(timeFrame ,outsideRth=False):
     # // trading time if time is perfect we can send trade then it will return none else it will give config trading time
@@ -567,8 +620,8 @@ async def get_first_chart_time(timeFrame ,outsideRth=False):
         await  asyncio.sleep(sec)
         return chartTime
     else:
-        chartTime = datetime.datetime.strptime(conf_trading_time, "%H:%M:%S")
-        return chartTime
+        t = datetime.datetime.strptime(conf_trading_time, "%H:%M:%S").time()
+        return datetime.datetime.combine(datetime.datetime.now().date(), t)
 
 
 def atrCheck(histData, ibContract, connection, atrPercentage, stop_size=None):
@@ -5564,9 +5617,14 @@ async def SendTrade(connection, symbol,timeFrame,profit,stopLoss,risk,tif,barTyp
                                 Config.entryTradeType[Config.RB_INDEX], Config.entryTradeType[Config.RBB_INDEX],  # RB, RBB
                                 Config.entryTradeType[Config.PBe1_INDEX], Config.entryTradeType[Config.PBe2_INDEX],
                                 Config.entryTradeType[Config.PBe1_3_INDEX], Config.entryTradeType[Config.PBe2_3_INDEX]) + MANUAL_ORDER_TYPES  # PBe1, PBe2, PBe1 (3), PBe2 (3)
+                if len(Config.entryTradeType) > Config.BOe2_INDEX:
+                    allowed_types = allowed_types + (
+                        Config.entryTradeType[Config.BOe1_INDEX],
+                        Config.entryTradeType[Config.BOe2_INDEX],
+                    )
                 logging.info("Session check: session=%s, barType='%s', allowed_types=%s, barType in allowed_types=%s", session, barType, allowed_types, barType in allowed_types)
                 if barType not in allowed_types:
-                    logging.warning("%s session: Only Conditional Order, RB/RBB, PBe1/PBe2, or manual orders allowed; skipping barType %s", session, barType)
+                    logging.warning("%s session: Only Conditional Order, RB/RBB, PBe1/PBe2, BO e1/e2, or manual orders allowed; skipping barType %s", session, barType)
                     return
             elif session == 'OVERNIGHT':
                 # Overnight: all strategies allowed, but orders will be converted to limit types
@@ -8012,8 +8070,7 @@ async def sendTpSlBuy(connection, entryData):
                         # For other trade types: use entry ± stop_size (existing logic)
                         # In extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
                         # For SHORT position (BUY stop loss): stop_loss = entry + stop_size
-                        # For Stop Order: Use entry_stop_price instead of filled_price
-                        base_price = entry_stop_price if entryData.get('barType') == Config.entryTradeType[0] else filled_price
+                        base_price = _bar_strategy_sl_tp_base_price(entryData, entry_stop_price, filled_price)
                         stpPrice = float(base_price) + float(stop_size)
                         logging.info(f"RB/LB/LB2/LB3 EntryBar stop loss (for SHORT): base_price={base_price} (entry_stop_price={entry_stop_price}, filled_price={filled_price}), stop_size={stop_size}, stpPrice={stpPrice}, barType={entryData.get('barType')}")
                     entryData['calculated_stop_size'] = stop_size
@@ -8154,8 +8211,7 @@ async def sendTpSlBuy(connection, entryData):
                     # Calculate stop loss price using stop size
                     # For SHORT position (BUY stop loss): stop_loss = entry + stop_size
                     # In extended hours, this will be used as stop price for STP LMT, with limit = entry + 2 × stop_size
-                    # For Stop Order: Use entry_stop_price instead of filled_price
-                    base_price = entry_stop_price if entryData.get('barType') == Config.entryTradeType[0] else filled_price
+                    base_price = _bar_strategy_sl_tp_base_price(entryData, entry_stop_price, filled_price)
                     stpPrice = float(base_price) + float(stop_size)
                     logging.info(f"RB/LB/LB2/LB3 BUY stop loss (for SHORT): base_price={base_price} (entry_stop_price={entry_stop_price}, filled_price={filled_price}), stop_size={stop_size}, stpPrice={stpPrice}, barType={entryData.get('barType')}")
                     # Store stop_size in entryData for sendStopLoss to use in extended hours
@@ -9993,8 +10049,7 @@ async def sendTpSlSell(connection, entryData):
                         # For other trade types: use entry ± stop_size (existing logic)
                         # In extended hours: stop = entry ± stop_size, limit = entry ± 2 × stop_size
                         # For LONG position (SELL stop loss): stop_loss = entry - stop_size
-                        # For Stop Order: Use entry_stop_price instead of filled_price
-                        base_price = entry_stop_price if entryData.get('barType') == Config.entryTradeType[0] else filled_price
+                        base_price = _bar_strategy_sl_tp_base_price(entryData, entry_stop_price, filled_price)
                         stpPrice = float(base_price) - float(stop_size)
                         logging.info(f"RB/LB/LB2/LB3 EntryBar stop loss (for LONG): base_price={base_price} (entry_stop_price={entry_stop_price}, filled_price={filled_price}), stop_size={stop_size}, stpPrice={stpPrice}, barType={entryData.get('barType')}")
                     entryData['calculated_stop_size'] = stop_size
@@ -10021,18 +10076,7 @@ async def sendTpSlSell(connection, entryData):
                         # Calculate stop loss price: use same stop_size and consistent base so SL and TP match (entry ± stop_size, TP = entry ± multiplier*stop_size).
                         # For LONG position (SELL stop loss): stop_loss = base_price - stop_size
                         # For SHORT position (BUY stop loss): stop_loss = base_price + stop_size
-                        is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
-                        # Conditional Order: use entry_stop_price (trigger) so SL = entry - stop_size, same stop_size as TP (entry + multiplier*stop_size).
-                        # RB/RBB/LB: Stop Order uses entry_stop_price; extended hours use entry_stop_price; RTH use filled_price.
-                        if entryData.get('barType') == Config.entryTradeType[Config.CONDITIONAL_ORDER_INDEX]:  # Conditional Order
-                            base_price = entry_stop_price  # Same base as TP: everything from entry, same stop_size
-                        elif entryData.get('barType') == Config.entryTradeType[0]:  # Stop Order
-                            base_price = entry_stop_price
-                        elif is_extended:
-                            base_price = entry_stop_price  # Extended hours: use entry_stop_price
-                        else:
-                            base_price = filled_price  # RTH: use filled_price
-                        
+                        base_price = _bar_strategy_sl_tp_base_price(entryData, entry_stop_price, filled_price)
                         if entryData.get('action') == 'BUY':  # LONG position
                             stpPrice = float(base_price) - float(stop_size)
                         else:  # SHORT position
@@ -10159,17 +10203,9 @@ async def sendTpSlSell(connection, entryData):
                     # For RTH: Use filled_price (not entry_stop_price) for stop loss calculation
                     # Only calculate if stpPrice hasn't been set yet (e.g., for non-EntryBar, non-Custom, non-HOD/LOD stop loss types)
                     if 'stpPrice' not in locals() or stpPrice is None:
-                        is_extended, session = _is_extended_outside_rth(entryData.get('outsideRth', False))
-                        # For Stop Order: Use entry_stop_price instead of filled_price
-                        # For RTH: Use filled_price (not entry_stop_price) for LB/RB/RBB/LB2/LB3
-                        if entryData.get('barType') == Config.entryTradeType[0]:  # Stop Order
-                            base_price = entry_stop_price
-                        elif is_extended:
-                            base_price = entry_stop_price  # Extended hours: use entry_stop_price
-                        else:
-                            base_price = filled_price  # RTH: use filled_price
+                        base_price = _bar_strategy_sl_tp_base_price(entryData, entry_stop_price, filled_price)
                         stpPrice = float(base_price) - float(stop_size)
-                        logging.info(f"RB/LB/LB2/LB3 SELL stop loss (for LONG): base_price={base_price} (entry_stop_price={entry_stop_price}, filled_price={filled_price}, is_extended={is_extended}), stop_size={stop_size}, stpPrice={stpPrice}, barType={entryData.get('barType')}")
+                        logging.info(f"RB/LB/LB2/LB3 SELL stop loss (for LONG): base_price={base_price} (entry_stop_price={entry_stop_price}, filled_price={filled_price}), stop_size={stop_size}, stpPrice={stpPrice}, barType={entryData.get('barType')}")
                     # Store stop_size in entryData for sendStopLoss to use in extended hours
                     entryData['calculated_stop_size'] = stop_size
             else:
